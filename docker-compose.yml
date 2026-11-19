@@ -1,0 +1,6 @@
+services:
+  mongoku:
+    image: huggingface/mongoku:latest
+    container_name: mongoku
+    network_mode: host
+    restart: unless-stopped
