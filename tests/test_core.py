@@ -137,3 +137,14 @@ def test_segment_from_mongo_accepts_catalog_page_key() -> None:
     )
     assert segment_item.page == 3
     assert segment_item.text == "hello"
+
+
+def test_document_payload_distinguishes_tsv_and_json() -> None:
+    doc = document([segment("hello", page=2, top=5, left=10)], title="Title")
+    tsv = document_payload(doc, "segments-tsv")
+    assert "segments_tsv" in tsv
+    assert "segments" not in tsv
+    assert tsv["segments_tsv"].startswith("page\ttop\tleft")
+    as_json = document_payload(doc, "segments-json")
+    assert isinstance(as_json["segments"], list)
+    assert as_json["segments"][0]["page"] == 2

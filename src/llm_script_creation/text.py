@@ -152,9 +152,19 @@ def document_payload(
         payload["title"] = document.title
     if representation == "text":
         payload["text"] = render_text(document, order=order, skip_noise=skip_noise)
-    else:
+    elif representation == "segments-tsv":
+        payload["segments_tsv"] = render_segments_tsv(
+            document,
+            order=order,
+            skip_noise=skip_noise,
+            include_position=include_position,
+            include_type=include_type,
+        )
+    elif representation == "segments-json":
         payload["segments"] = [
             segment.as_dict(include_position=include_position, include_type=include_type)
             for segment in ordered_segments(document, order=order, skip_noise=skip_noise)
         ]
+    else:
+        raise ValueError(f"unknown representation: {representation!r}")
     return payload
