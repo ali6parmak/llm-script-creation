@@ -120,6 +120,16 @@ def fmt(value: Any, digits: int = 3) -> str:
     return str(value)
 
 
+def show_json(value: Any, *, height: int | str | None = None) -> None:
+    kwargs = {"height": height} if height is not None else {}
+    st.code(
+        json.dumps(value, indent=2, ensure_ascii=False),
+        language="json",
+        wrap_lines=True,
+        **kwargs,
+    )
+
+
 def show_table(
     frame: pd.DataFrame,
     *,
@@ -266,7 +276,7 @@ def render_gold(gold: dict[str, Any]) -> None:
             recs["countries"] = recs["countries"].apply(lambda value: ", ".join(value))
         show_table(recs, height=400, max_rows=300)
     else:
-        st.json(gold)
+        show_json(gold)
 
 
 def render_prediction(record: dict[str, Any], dataset_id: str) -> None:
@@ -320,7 +330,7 @@ def render_prediction(record: dict[str, Any], dataset_id: str) -> None:
         if rows:
             show_table(pd.DataFrame(rows), status=True, height=300, metrics=["token F1"])
     with st.expander("Raw prediction JSON"):
-        st.json(record.get("prediction"))
+        show_json(record.get("prediction"), height=300)
 
 
 def render_payload(document_row: dict[str, Any]) -> None:
@@ -423,14 +433,14 @@ def page_datasets(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]
     left, right = st.columns([1, 1])
     with left:
         st.markdown("**Target schema**")
-        st.json(manifest.get("target_schema", {}))
+        show_json(manifest.get("target_schema", {}))
         st.markdown("**Split policy**")
-        st.json(manifest.get("split_policy", {}))
+        show_json(manifest.get("split_policy", {}))
     with right:
         st.markdown("**Label distribution**")
         distribution = manifest.get("label_distribution", {})
         if isinstance(distribution, dict) and "recommendations_total" in distribution:
-            st.json(distribution)
+            show_json(distribution)
         elif isinstance(distribution, dict):
             for key, values in distribution.items():
                 st.caption(key)
@@ -763,7 +773,7 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
         else:
             st.info("Rule-based baseline: no LLM prompt.")
         with st.expander("Method configuration"):
-            st.json(method.get("config", {}))
+            show_json(method.get("config", {}))
     with tabs[1]:
         if script_path.exists():
             st.code(script_path.read_text(encoding="utf-8"), language="python")
@@ -791,7 +801,7 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
             with st.expander("Raw response"):
                 st.code(data.get("response", ""), language="text", height=300, wrap_lines=True)
     with tabs[3]:
-        st.json(metrics)
+        show_json(metrics)
 
 
 def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:

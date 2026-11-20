@@ -228,14 +228,35 @@ def inject_css() -> None:
         [data-testid="stTable"] tr:hover td {{
             background: var(--gb-bg2);
         }}
-        [data-baseweb="select"] > div,
-        [data-baseweb="input"] > div,
+        [data-testid="stSelectbox"] input,
+        [data-testid="stSelectbox"] button,
+        [data-testid="stSelectbox"] [role="group"],
         [data-testid="stTextInput"] input,
         [data-testid="stNumberInput"] input,
         [data-baseweb="textarea"] {{
             background-color: var(--gb-bg1) !important;
             color: var(--gb-fg) !important;
+            -webkit-text-fill-color: var(--gb-fg) !important;
             border-color: var(--gb-bg2) !important;
+        }}
+        [data-testid="stSelectbox"] svg {{
+            fill: var(--gb-fg2) !important;
+            color: var(--gb-fg2) !important;
+        }}
+        [data-testid="stRadio"] label,
+        [data-testid="stRadio"] p,
+        [data-testid="stRadio"] [data-testid="stMarkdownContainer"] {{
+            color: var(--gb-fg2) !important;
+        }}
+        [data-testid="stRadioOption"][data-selected="true"] p,
+        [data-testid="stRadioOption"][data-selected="true"] [data-testid="stMarkdownContainer"] {{
+            color: var(--gb-fg) !important;
+        }}
+        [data-testid="stRadioOption"] div[class*="ex50key4"] {{
+            border-color: var(--gb-bg3) !important;
+        }}
+        [data-testid="stRadioOption"] div[class*="ex50key5"] {{
+            background-color: var(--gb-yellow) !important;
         }}
         [data-baseweb="select"] *,
         [data-baseweb="select"] span,
