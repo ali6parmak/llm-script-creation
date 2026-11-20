@@ -80,8 +80,14 @@ def execute_extractor(
     source: str,
     samples: Iterable[dict[str, Any]],
     score_request: dict[str, Any] | None = None,
+    prediction_key_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Validate ``source``, run it over ``samples``, optionally admin-score it."""
+    """Validate ``source``, run it over ``samples``, optionally admin-score it.
+
+    ``prediction_key_map`` renames output keys for the benchmark (e.g. the UPR
+    ``state_reviewed`` relationship property -> our ``state_under_review`` gold
+    field) before both scoring paths see the prediction.
+    """
     rejection = validate_extractor_source(source)
     if rejection is not None:
         return {"mode": "execute", "status": "error", "error": rejection}
@@ -98,6 +104,11 @@ def execute_extractor(
             text, context = sample_input(sample)
             text_chars = len(text)
             prediction, error = call_candidate(extract, text, context)
+            if prediction and prediction_key_map:
+                prediction = dict(prediction)
+                for source_key, target_key in prediction_key_map.items():
+                    if source_key in prediction and target_key not in prediction:
+                        prediction[target_key] = prediction[source_key]
         except Exception as exc:  # noqa: BLE001 - a bad sample is data, not a crash
             error = f"{type(exc).__name__}: {exc}"
         predictions.append(

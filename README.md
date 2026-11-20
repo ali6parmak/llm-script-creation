@@ -38,9 +38,10 @@ uv run generate-script --dataset plan_year --examples 2 --max-repair-rounds 4
 This is a different strategy from `generate-script`: instead of asking the LLM to write a
 script for our prompt, we run the **real Uwazi admin agent's nested extractor subagent**
 (`uwazi_admin_agent.use_cases.author_extractor_tool.build_extractor_agent`) over our Plan
-data, then execute the returned `def extract(text, ctx)` with the admin agent's own sandbox.
+and UPR data, then execute the returned `def extract(text, ctx)` with the admin agent's own
+sandbox.
 
-Phase 1 uses the admin agent as-is (its model, its prompt, its tools). The default condition
+The adapter uses the admin agent as-is (its model, its prompt, its tools). The default condition
 is **no title**: entity titles and `ctx["title"]` are empty, other Uwazi metadata stays
 visible, and the target property is removed from `ctx.metadata` at execution time so a
 metadata shortcut cannot score. (Earlier v1/v2 runs had the title visible.) The extractor is
@@ -58,9 +59,19 @@ Uwazi instance.
 # spike: author + execute on 5 train / 5 test documents
 uv run benchmark-admin-agent --dataset plan_year --limit-train 5 --limit-test 5
 
-# full phase-1 run: the real 50-document train split and the whole test split
+# full run: the real 50-document train split and the whole test split
 uv run benchmark-admin-agent --dataset plan_year
+
+# UPR: state under review, then recommendation records (state + number + text + countries)
+uv run benchmark-admin-agent --dataset upr_state
+uv run benchmark-admin-agent --dataset upr_recommendations
 ```
+
+`upr_state` uses the real relationship property (`state_reviewed`) and maps it to our
+`state_under_review` gold field; the task receives all 195 Uwazi State labels.
+`upr_recommendations` is **record extraction**, not a record write: the extractor returns a
+list of `{number, text, countries}` records plus the state, which our existing UPR evaluator
+scores. The full create-and-link path remains out of scope.
 
 The admin repo's `.venv` currently predates two dependencies declared in its `pyproject.toml`
 (`rapidfuzz`, `python-dateutil`). Rather than modify that read-only repo, the sidecar layers
@@ -75,9 +86,10 @@ uv pip install --target work/admin_agent_extra \
 
 The method type is `admin_agent_extractor`; artifacts land under
 `artifacts/methods/<method_id>/` (task prompt, extractor source, attempt with the admin
-agent's tool-call transcript) and `artifacts/runs/<run_id>/` (predictions, our Plan metrics,
-the admin agent's own `extraction_eval` view, and model usage). Nothing is written to the
-`plan` / `upr` databases.
+agent's tool-call transcript) and `artifacts/runs/<run_id>/` (predictions, our dataset
+metrics, the admin agent's own `extraction_eval` view, and model usage). For
+`upr_recommendations` the admin view covers the state property only. Nothing is written to
+the `plan` / `upr` databases.
 
 ## Split policy `v2-50train`
 

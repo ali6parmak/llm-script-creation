@@ -762,9 +762,50 @@ as mismatches: 8,190 matched / 263 mismatched / 55 missing (96.26%) versus our 8
 rule used to compare methods, and the admin view is recorded as-is. The two views agree on
 every other document for this field.
 
-**Status:** the no-title v3 adapter now covers all eight single Plan fields with gold. UPR
-`state_reviewed` (relationship; labels now, State sharedIds for a write) is next, then UPR
-recommendations as record extraction. The full `GenerateScriptUseCase` bulk-script path
+**UPR state (no title, v3).** `state_reviewed` is a relationship property, so the task uses
+the real property name and the sidecar maps the prediction back to our `state_under_review`
+gold field. The task lists all 195 Uwazi State labels as candidates. Result: **115/115 test
+(1.000)**, 5 author requests, 331,885 tokens. The extractor embeds the candidate list,
+reads the state from page 1, and maps document spellings to the Uwazi label. The admin
+agent's own display scorer reports 98.8% because two gold labels carry a trailing newline
+(`"Trinidad and Tobago\n"`, `"Bosnia and Herzegovina\n"`); our canonical-state
+normalization strips it. This is gold noise, not an extraction miss.
+
+**UPR recommendations (record extraction, no title, v3).** This is the biggest TASKS item.
+The task asks for `{"state_under_review": label, "recommendations": [{number, text,
+countries}]}`, lists all 195 State labels, and tells the extractor that
+`benchmark_extractor` cannot score a recommendation list (the document metadata only links
+recommendation ids, not their text), so it must self-prove on sampled documents. The
+extractor was authored from only **4 sampled train documents**; it parses section II of the
+Working Group report, skips page furniture, merges cross-page continuations, and splits
+multi-country recommendations into sub-numbered records.
+
+| UPR recommendations | Test |
+|---|---:|
+| Documents | 114 |
+| Gold / predicted / matched | 26,964 / 27,014 / 26,431 |
+| Precision / recall / F1 | 0.978 / 0.980 / **0.979** |
+| Text F1 | 0.9995 |
+| Country accuracy | 0.982 |
+| Exact-number accuracy | 0.991 |
+| State accuracy | 0.991 |
+| Statuses | 111 hit · 3 partial · 0 wrong · 0 missing |
+
+Train F1 is 0.995; the run used 6 author requests and 545,166 tokens. This **beats our own
+script pipeline** (`0.945` test with segments+position) and the deterministic baseline
+(`0.883`) without using positions at all. The `admin_eval` stored for this run is
+**state-only** (98.2%); it is not a recommendation score and should not be compared with the
+F1 above.
+
+The result says the admin agent's text-only record parser plus the candidate-country list is
+strong on this task. It does not yet tell us whether the country list is necessary: the
+function embeds the list, so a no-list A/B is the next experiment. Positions/sizes were not
+provided to this extractor; that TASKS factor is still untested here (our own pipeline's
+segments+position variant remains the evidence for it).
+
+**Status:** the no-title v3 adapter now covers all eight single Plan fields with gold, UPR
+state, and UPR recommendation records. Remaining TASKS factors: a no-country-list A/B,
+position/size input, and prompt variants. The full `GenerateScriptUseCase` bulk-script path
 remains out of scope.
 
 ### What the v2 numbers show

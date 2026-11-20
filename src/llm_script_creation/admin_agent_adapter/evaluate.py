@@ -19,7 +19,14 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from ..evaluation import aggregate_plan, evaluate_plan_sample
+from ..evaluation import (
+    aggregate_plan,
+    aggregate_upr,
+    aggregate_upr_state,
+    evaluate_plan_sample,
+    evaluate_upr_sample,
+    evaluate_upr_state_sample,
+)
 
 
 def score_records(
@@ -33,23 +40,31 @@ def score_records(
     ``samples`` are ``{"doc_id", "split", "gold"}`` dicts (from the catalog).
     ``predictions`` maps ``doc_id`` to ``{"prediction", "error", "latency_ms"}``.
     """
-    if not dataset_id.startswith("plan_") or dataset_id == "plan_all_fields":
-        raise ValueError(
-            f"admin-agent adapter phase 1 supports single Plan fields only, got {dataset_id!r}"
-        )
+    if dataset_id in {"upr_state", "upr_recommendations"}:
+        kind = dataset_id
+    elif dataset_id.startswith("plan_") and dataset_id != "plan_all_fields":
+        kind = "plan"
+    else:
+        raise ValueError(f"admin-agent adapter does not support dataset {dataset_id!r}")
 
     records: list[dict[str, Any]] = []
     for sample in samples:
         doc_id = str(sample["doc_id"])
         result = predictions.get(doc_id) or {}
-        prediction = result.get("prediction")
+        prediction = _adapt_prediction(result.get("prediction"))
         error = result.get("error")
         gold = sample.get("gold") or {}
         if error:
             status = "error"
             details: dict[str, Any] = {}
-        else:
+        elif kind == "plan":
             details = evaluate_plan_sample(gold, prediction, fields)
+            status = details["status"]
+        elif kind == "upr_state":
+            details = evaluate_upr_state_sample(gold, prediction)
+            status = details["status"]
+        else:
+            details = evaluate_upr_sample(gold, prediction)
             status = details["status"]
         records.append(
             {
@@ -66,23 +81,46 @@ def score_records(
 
     train_records = [record for record in records if record["split"] == "train"]
     test_records = [record for record in records if record["split"] == "test"]
-    train_metrics = aggregate_plan(train_records, fields)
-    test_metrics = aggregate_plan(test_records, fields)
-    train_score = float(train_metrics["accuracy"])
-    test_score = float(test_metrics["accuracy"])
+    if kind == "plan":
+        train_metrics = aggregate_plan(train_records, fields)
+        test_metrics = aggregate_plan(test_records, fields)
+        metric = "accuracy"
+        train_score = float(train_metrics["accuracy"])
+        test_score = float(test_metrics["accuracy"])
+        coverage = {
+            split: _coverage(metrics, fields)
+            for split, metrics in (("train", train_metrics), ("test", test_metrics))
+        }
+    elif kind == "upr_state":
+        train_metrics = aggregate_upr_state(train_records)
+        test_metrics = aggregate_upr_state(test_records)
+        metric = "accuracy"
+        train_score = float(train_metrics["accuracy"])
+        test_score = float(test_metrics["accuracy"])
+        coverage = {
+            "train": _status_coverage(train_records),
+            "test": _status_coverage(test_records),
+        }
+    else:
+        train_metrics = aggregate_upr(train_records)
+        test_metrics = aggregate_upr(test_records)
+        metric = "f1"
+        train_score = float(train_metrics["f1"])
+        test_score = float(test_metrics["f1"])
+        coverage = {
+            "train": _status_coverage(train_records),
+            "test": _status_coverage(test_records),
+        }
 
     errors = [
         {"doc_id": record["doc_id"], "split": record["split"], "error": record["error"]}
         for record in records
         if record["status"] == "error"
     ]
-    coverage = {
-        split: _coverage(metrics, fields) for split, metrics in (("train", train_metrics), ("test", test_metrics))
-    }
     metrics: dict[str, Any] = {
-        "primary_metric": "accuracy",
+        "primary_metric": metric,
         "primary": {
-            "metric": "accuracy",
+            "metric": metric,
             "train": train_score,
             "train_nonexample": None,
             "test": test_score,
@@ -106,6 +144,23 @@ def score_records(
         "test_documents": len(test_records),
     }
     return records, metrics
+
+
+def _adapt_prediction(prediction: Any) -> Any:
+    """Accept the real Uwazi property name for the UPR state relationship."""
+    if isinstance(prediction, dict) and "state_under_review" not in prediction and "state_reviewed" in prediction:
+        adapted = dict(prediction)
+        adapted["state_under_review"] = prediction["state_reviewed"]
+        return adapted
+    return prediction
+
+
+def _status_coverage(records: list[dict[str, Any]]) -> float | None:
+    """Share of samples where the extractor produced anything."""
+    if not records:
+        return None
+    produced = sum(1 for record in records if record["status"] != "missing_prediction")
+    return produced / len(records)
 
 
 def _coverage(metrics: dict[str, Any], fields: list[str]) -> float | None:

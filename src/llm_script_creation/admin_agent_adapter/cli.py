@@ -30,10 +30,16 @@ from bson import ObjectId
 from .. import catalog, runs
 from ..configuration import CATALOG_PATH, WORK_DIR
 from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
+from ..normalization import load_states
 from . import evaluate, prompt, records
 
 TYPE = "admin_agent_extractor"
 DOCUMENT_TEMPLATE_BY_DB = {"plan": PLAN_DOCUMENT_TEMPLATE, "upr": UPR_DOCUMENT_TEMPLATE}
+
+# Benchmark field -> real Uwazi property. Most fields share a name; UPR state is
+# a relationship property called state_reviewed while our dataset gold calls it
+# state_under_review.
+PROPERTY_BY_FIELD = {"state_under_review": "state_reviewed"}
 
 #: No-title condition. Title is removed from every entity view the extractor
 #: sees: AgentEntity.title, raw entities, query summaries and ctx["title"].
@@ -52,11 +58,8 @@ def _load_dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
     data = dict(row)
     data["manifest"] = records.load_json(data.get("manifest_json"), {})
     data["target_schema"] = records.load_json(data.get("target_schema_json"), {})
-    if data["db"] != "plan":
-        raise SystemExit(
-            "Phase 1 supports Plan fields only; UPR state/recommendations are later phases "
-            f"(dataset {dataset_id!r} is in db {data['db']!r})."
-        )
+    if data["db"] not in DOCUMENT_TEMPLATE_BY_DB:
+        raise SystemExit(f"Unknown database for dataset {dataset_id!r}: {data['db']!r}")
     # The catalog keeps the dataset spec but not its template id; the document
     # template is a per-database constant in db.py.
     data["template"] = DOCUMENT_TEMPLATE_BY_DB[data["db"]]
@@ -134,6 +137,30 @@ def _allowed_values(property_type: str, train_records: list[dict[str, Any]], fie
         if gold.get(field) is not None and str(gold[field]).strip()
     }
     return sorted(values)
+
+
+def _candidate_values(
+    dataset_id: str, property_type: str, train_records: list[dict[str, Any]], field: str
+) -> list[str] | None:
+    """Candidate labels the task may show. UPR uses the full Uwazi State list."""
+    if dataset_id in {"upr_state", "upr_recommendations"}:
+        return [str(state["label"]) for state in load_states()]
+    return _allowed_values(property_type, train_records, field)
+
+
+def _prompt_extras(dataset_id: str) -> dict[str, str]:
+    if dataset_id == "upr_state":
+        return {
+            "value_shape": 'the Uwazi State label verbatim, e.g. "Afghanistan" (not the sharedId)',
+            "task_hint": (
+                "The state under review is printed on the first page (header/title). "
+                "Return the State label; document spellings may differ from the Uwazi label."
+            ),
+            "candidate_block_title": (
+                "CANDIDATE STATE LABELS (Uwazi State entities; use the label verbatim)"
+            ),
+        }
+    return {}
 
 
 def _target_properties(dataset_id: str, field: str) -> set[str]:
@@ -263,13 +290,22 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         dataset = _load_dataset(conn, dataset_id)
         template = _load_template(dataset)
         fields = list(dataset["target_schema"])
-        if len(fields) != 1:
-            raise SystemExit(f"Phase 1 supports single-field datasets, got {fields}")
+        is_records = dataset_id == "upr_recommendations"
+        if not is_records and len(fields) != 1:
+            raise SystemExit(f"This adapter supports single-field datasets, got {fields}")
         field = fields[0]
-        properties = {prop["name"]: prop for prop in template["properties"]}
-        if field not in properties:
-            raise SystemExit(f"Field {field!r} is not a property of template {template['name']!r}")
-        property_type = properties[field]["type"]
+        if is_records:
+            property_name = "recommendations"
+            property_type = "record_extraction"
+        else:
+            property_name = PROPERTY_BY_FIELD.get(field, field)
+            properties = {prop["name"]: prop for prop in template["properties"]}
+            if property_name not in properties:
+                raise SystemExit(
+                    f"Field {field!r} maps to property {property_name!r}, which is not on "
+                    f"template {template['name']!r}"
+                )
+            property_type = properties[property_name]["type"]
 
         train_rows = _rows(conn, dataset_id, "train", limit_train)
         test_rows = _rows(conn, dataset_id, "test", limit_test)
@@ -286,16 +322,27 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     directory.mkdir(parents=True, exist_ok=True)
 
     redact_properties = _target_properties(dataset_id, field)
-    task_prompt = prompt.build_author_task(
-        dataset_id=dataset_id,
-        property_name=field,
-        property_type=property_type,
-        template_name=template["name"],
-        train_total=len(train_records),
-        allowed_values=_allowed_values(property_type, train_records, field),
-        title_visible=TITLE_VISIBLE,
-        target_metadata_hidden=True,
-    )
+    if is_records:
+        task_prompt = prompt.build_recommendations_task(
+            dataset_id=dataset_id,
+            template_name=template["name"],
+            train_total=len(train_records),
+            state_labels=_candidate_values("upr_state", "relationship", train_records, field) or [],
+            title_visible=TITLE_VISIBLE,
+            target_metadata_hidden=True,
+        )
+    else:
+        task_prompt = prompt.build_author_task(
+            dataset_id=dataset_id,
+            property_name=property_name,
+            property_type=property_type,
+            template_name=template["name"],
+            train_total=len(train_records),
+            allowed_values=_candidate_values(dataset_id, property_type, train_records, field),
+            title_visible=TITLE_VISIBLE,
+            target_metadata_hidden=True,
+            **_prompt_extras(dataset_id),
+        )
     author_request = {
         "mode": "author",
         "dataset_id": dataset_id,
@@ -359,8 +406,13 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         "mode": "execute",
         "extractor_source": code,
         "samples_path": str(execute_path),
+        "prediction_key_map": (
+            {"state_reviewed": "state_under_review"}
+            if is_records
+            else ({property_name: field} if property_name != field else {})
+        ),
         "score": {
-            "property_names": [field],
+            "property_names": ["state_under_review"] if is_records else [field],
             "expected": expected,
             "policy": "normalized",
         },
@@ -375,7 +427,7 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
 
     predictions = {item["doc_id"]: item for item in execution.get("predictions") or []}
     samples = sample_meta
-    scored_records, metrics = evaluate.score_records(dataset_id, [field], samples, predictions)
+    scored_records, metrics = evaluate.score_records(dataset_id, fields, samples, predictions)
     usage = _sidecar_usage(author)
     metrics["token_usage"] = usage
     metrics["admin_eval"] = execution.get("admin_eval")
@@ -397,11 +449,14 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
 
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
-    prompt_slug = runs.slug(prompt.PROMPT_VERSION).removeprefix("admin_agent_")
+    prompt_version = (
+        prompt.PROMPT_VERSION_RECOMMENDATIONS if is_records else prompt.PROMPT_VERSION
+    )
+    prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
     method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}"
     config = {
         "condition": "no_title",
-        "prompt_version": prompt.PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "title_visible": TITLE_VISIBLE,
         "metadata_visible": True,
         "target_property_visible_at_execution": False,
@@ -409,8 +464,11 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         "source": "primary-document segmentation",
         "template_name": template["name"],
         "template_id": dataset["template"],
-        "property_name": field,
+        "property_name": property_name,
+        "benchmark_field": field,
+        "benchmark_fields": fields,
         "property_type": property_type,
+        "candidate_values": len(_candidate_values(dataset_id, property_type, train_records, field) or []),
         "admin_agent_model": author.get("model"),
         "admin_agent_base_url": author.get("base_url"),
         "max_requests": author_request["max_requests"],
@@ -422,13 +480,13 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     }
     method = evaluate.build_method(
         method_id=method_id,
-        name=f"Admin agent extractor — {dataset_id} ({prompt.PROMPT_VERSION})",
+        name=f"Admin agent extractor — {dataset_id} ({prompt_version})",
         description=(
             "The real Uwazi admin agent's nested extractor subagent authors `def extract(text, ctx)` "
             "from primary-document segmentation on the train split (NO-TITLE condition: entity "
             "titles are hidden, other metadata visible, and the target property is removed from "
             "ctx.metadata at execution). The frozen function runs once over train and test, scored "
-            "against real Uwazi metadata with our Plan evaluator."
+            "against real Uwazi metadata with our dataset evaluator."
         ),
         dataset_id=dataset_id,
         task=dataset["task"],
@@ -442,7 +500,7 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         train_documents=len(train_records),
         test_documents=test_count,
         created_at=now,
-        prompt_version=prompt.PROMPT_VERSION,
+        prompt_version=prompt_version,
     )
     attempt = {
         "round": 1,

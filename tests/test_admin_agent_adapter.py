@@ -168,9 +168,25 @@ def test_score_records_marks_execution_errors() -> None:
     assert metrics["errors"][0]["doc_id"] == "a"
 
 
-def test_score_records_rejects_non_phase_one_datasets() -> None:
+def test_score_records_rejects_unsupported_datasets() -> None:
     with pytest.raises(ValueError):
-        evaluate.score_records("upr_state", ["state_under_review"], [], {})
+        evaluate.score_records("plan_all_fields", ["year"], [], {})
+
+
+def test_score_records_maps_upr_state_property() -> None:
+    samples = [
+        {"doc_id": "a", "split": "test", "gold": {"state_under_review": "Afghanistan"}},
+    ]
+    predictions = {"a": {"prediction": {"state_reviewed": "Afghanistan"}}}
+
+    scored, metrics = evaluate.score_records(
+        "upr_state", ["state_under_review"], samples, predictions
+    )
+
+    assert scored[0]["status"] == "hit"
+    assert scored[0]["prediction"]["state_under_review"] == "Afghanistan"
+    assert metrics["primary"]["metric"] == "accuracy"
+    assert metrics["primary"]["test"] == 1.0
 
 
 def test_records_models_load_with_admin_agent_when_available() -> None:
@@ -194,3 +210,51 @@ def test_records_models_load_with_admin_agent_when_available() -> None:
     assert entity.shared_id == "abc"
     assert entity.metadata["year"] == [{"value": 2019}]
     assert segmentation.paragraphs[0].page_number == 1
+
+
+def test_recommendations_task_shape_and_candidate_list() -> None:
+    task = prompt.build_recommendations_task(
+        dataset_id="upr_recommendations",
+        template_name="Document",
+        train_total=50,
+        state_labels=[f"State {index}" for index in range(60)],
+    )
+
+    assert '"recommendations"' in task
+    assert '"number"' in task and '"text"' in task and '"countries"' in task
+    assert "CANDIDATE STATE LABELS" in task
+    assert "State 59" in task  # the full candidate list is shown, not just the first 20
+    assert "benchmark_extractor" in task
+
+
+def test_score_records_scores_upr_recommendation_records() -> None:
+    gold_recommendations = [
+        {"number": "95.24", "text": "End the practice.", "countries": ["France"]},
+        {"number": "95.25", "text": "Ratify the treaty.", "countries": ["Spain"]},
+    ]
+    samples = [
+        {
+            "doc_id": "a",
+            "split": "test",
+            "gold": {"state_under_review": "Albania", "recommendations": gold_recommendations},
+        }
+    ]
+    predictions = {
+        "a": {
+            "prediction": {
+                "state_under_review": "Albania",
+                "recommendations": gold_recommendations,
+            }
+        }
+    }
+
+    scored, metrics = evaluate.score_records(
+        "upr_recommendations",
+        ["state_under_review", "recommendations"],
+        samples,
+        predictions,
+    )
+
+    assert scored[0]["status"] == "hit"
+    assert metrics["primary"]["metric"] == "f1"
+    assert metrics["primary"]["test"] == 1.0

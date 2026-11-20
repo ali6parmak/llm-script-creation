@@ -76,12 +76,14 @@ def main(argv: list[str] | None = None) -> int:
                     str(request.get("extractor_source") or ""),
                     _iter_jsonl(Path(str(samples_path))),
                     request.get("score"),
+                    request.get("prediction_key_map"),
                 )
             else:
                 response = execute_extractor(
                     str(request.get("extractor_source") or ""),
                     list(request.get("samples") or []),
                     request.get("score"),
+                    request.get("prediction_key_map"),
                 )
     except Exception as exc:  # noqa: BLE001 - report the concrete failure to the caller
         response = {
