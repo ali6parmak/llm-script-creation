@@ -24,7 +24,7 @@ class Segment:
     def from_mongo(cls, raw: dict[str, Any]) -> Segment:
         return cls(
             text=str(raw.get("text", "")),
-            page=int(raw.get("page_number", 0) or 0),
+            page=int(raw.get("page_number", raw.get("page", 0)) or 0),
             top=float(raw.get("top", 0) or 0),
             left=float(raw.get("left", 0) or 0),
             width=float(raw.get("width", 0) or 0),

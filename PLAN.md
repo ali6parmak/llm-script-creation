@@ -1,7 +1,7 @@
 # PLAN — LLM-written extraction scripts for Uwazi documents
 
-**Status:** data inspection complete (M0). Next: dataset builder, evaluation harness, and script-generation pipeline (M1–M2).
-**Last updated:** 2026-11-19.
+**Status:** end-to-end prototype built (catalog/datasets, viewer, baselines, LLM pipeline). First experiments run; next is prompt/model iteration and deeper analysis.
+**Last updated:** 2026-11-20.
 
 ## 1. Context and goal
 
@@ -485,3 +485,95 @@ The inspection report is generated with:
 uv run inspect-data          # writes reports/data_report.md and .json
 uv run inspect-data --db plan
 ```
+
+
+## 14. Implementation status and first results (2026-11-20)
+
+### What is built
+
+| Piece | Where | Status |
+|---|---|---|
+| Document catalog + datasets + splits + manifests | `src/llm_script_creation/catalog.py`, `datasets.py`, `artifacts/` | done |
+| Streamlit viewer (datasets, samples, methods, runs, compare) | `app/app.py` | done |
+| Rule-based baselines | `baselines.py`, `experiments.py` | done |
+| Evaluation (Plan fields + UPR recommendations) | `evaluation.py`, `normalization.py` | done |
+| LLM prompt builder + client + sandbox + repair loop | `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` | done |
+| Method/run artifacts | `runs.py`, `artifacts/methods`, `artifacts/runs` | done |
+
+Commands:
+
+```bash
+uv run build-datasets
+uv run run-baselines --split dev
+uv run generate-script --dataset plan_year --split dev --model qwen2.5-coder:14b
+uv run streamlit run app/app.py
+```
+
+The catalog is ~800 MB and lives in `artifacts/catalog.db` (gitignored). Dataset manifests
+and sample ids are in `artifacts/datasets/`. Methods and runs are self-describing JSON
+directories under `artifacts/methods/` and `artifacts/runs/`; the viewer reads them directly.
+
+Dataset sizes after intersecting with segmented English documents:
+
+| Dataset | Samples |
+|---|---:|
+| `plan_document_type` | 3,112 |
+| `plan_legal_status` | 3,112 |
+| `plan_means_of_adoption` | 3,111 |
+| `plan_year` | 10,391 |
+| `plan_document_code` | 8,840 |
+| `plan_body` | 10,512 |
+| `plan_field_month` | 1,716 |
+| `plan_document_number` | 1,388 |
+| `plan_all_fields` | 2,792 |
+| `upr_state` | 165 |
+| `upr_recommendations` | 164 (38,774 recommendations) |
+
+### First dev-split results
+
+Baselines (deterministic regex/heuristics):
+
+| Dataset | Metric |
+|---|---:|
+| `plan_year` | accuracy 0.926 |
+| `plan_document_code` | accuracy 0.944 |
+| `upr_state` | accuracy 1.000 |
+| `upr_recommendations` | P 0.959 / R 0.703 / F1 0.811 |
+
+First LLM-generated scripts (dev, `qwen2.5-coder:14b` unless noted):
+
+| Dataset | Result |
+|---|---|
+| `plan_year` | accuracy 0.603 (first 4-digit year anywhere; ignores date hints) |
+| `plan_year` (llama3.2:3b) | accuracy 0.610 |
+| `upr_state` | 0.000 — generated scripts returned empty or missed the split title line |
+| `upr_recommendations` | P 0.892 / R 0.289 / F1 0.437; country 0.921; exact number 0.983; state 0.000 |
+
+These are **not** tuned final results. They already show the main failure modes:
+
+- LLM scripts miss the difference between "first year in the text" and "document year".
+- Plain-text UPR titles can be split across lines (`Report of the Working Group ...` /
+  `Review *` / `Albania`); generated scripts assume the state is the immediate next line.
+- A single recommendation paragraph may contain several recommendations, and UPR state
+  extraction and paragraph splitting need explicit structural instructions.
+- A valid JSON shape can still be semantically wrong; the smoke repair loop now checks a
+  few dev examples and feeds mismatches back to the model.
+
+### Model note
+
+`deepseek-v4.1-flash:cloud` (and the other cloud models tested) spent the entire completion
+budget on hidden reasoning and returned empty `content` for these prompts, even at 16k
+tokens. The pipeline records `finish_reason`, `reasoning`, token usage, and every attempt.
+For the first experiments I used local coder/instruct models via `--model`
+(`qwen2.5-coder:14b`, `llama3.2:3b`). The configured `MODEL` constant remains the default;
+switching the default is a deliberate decision, not a silent change.
+
+### Known issues / next
+
+1. Improve prompts/representations for UPR state and recommendation extraction; segment
+   types are likely the right representation for split title lines.
+2. Test `segments` vs `text` on the same dataset; current UPR runs are text-only.
+3. Run frozen scripts on the test split (not done yet).
+4. Add a run summary/report command so results do not only live in the UI.
+5. Review the `upr_recommendations` gold noise and sub-number matching before drawing strong
+   conclusions.

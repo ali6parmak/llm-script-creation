@@ -80,7 +80,10 @@ def _task_instructions(dataset: dict[str, Any]) -> str:
             "RECOMMENDATION RULES:",
             "- The recommendation section usually starts after a sentence such as "
             '"The following recommendations will be examined by <state>".',
-            "- A recommendation paragraph starts with a number like 96.1 or 24.112.",
+            "- Recommendation paragraphs are separated by newlines, not necessarily by blank lines.",
+            "- Scan the whole recommendation section for numbers like 96.1 or 24.112; do not only "
+            "look at the beginning of a line. The text between one number and the next belongs to "
+            "the recommendation.",
             "- One paragraph can contain several recommendations separated by ';'. Split them.",
             "- If several recommendations share the same paragraph number, number them "
             "24.112.1, 24.112.2, ... in reading order.",
@@ -90,6 +93,11 @@ def _task_instructions(dataset: dict[str, Any]) -> str:
             "- Recommendations can be split across lines; join wrapped lines.",
             "- Do not invent numbers or recommendations. If the document has no recommendation "
             "section, return an empty list.",
+            "- Practical algorithm: find the marker 'recommendations will be examined', then scan "
+            "the rest of the text for number matches like r'(?<!\\d)(\\d{1,3}\\.\\d{1,3})(?!\\d)'. "
+            "Everything between two numbers belongs to one recommendation paragraph. Inside that "
+            "chunk, split on ');' if there are several '(country);' endings. The last parenthetical "
+            "before the semicolon is the recommending country.",
         ]
     elif dataset_id == "upr_state":
         lines += [
@@ -97,8 +105,11 @@ def _task_instructions(dataset: dict[str, Any]) -> str:
             "OUTPUT SHAPE:",
             '{"state_under_review": "<state name>"}',
             "",
-            "Read the state from the first page (the title line / section header). The document "
-            "title is not provided.",
+            "Read the state from the first page. In UPR reports the state usually appears on its "
+            "own line immediately after the line containing 'Report of the Working Group on the "
+            "Universal Periodic Review' (sometimes with an asterisk). Strip asterisks/footnote "
+            "marks. If that fails, use the shortest section-header-like line on page 1 that is "
+            "not a UN organ/session heading. The document title is not provided.",
         ]
     elif len(fields) == 1:
         lines += [
@@ -111,13 +122,30 @@ def _task_instructions(dataset: dict[str, Any]) -> str:
     else:
         lines += ["", "OUTPUT SHAPE:", json.dumps({field: None for field in fields}, indent=2)]
 
+    if dataset_id == "plan_year":
+        lines += [
+            "",
+            "YEAR HINT:",
+            "- Prefer the document's own adoption/publication date on the first page, e.g. a line "
+            "such as 'Distr.: General 2 July 2021', '30 June 2021', or 'adopted ... 30 June 2021'.",
+            "- Do not simply return the first year in the whole text: opening paragraphs often cite "
+            "older resolutions, conventions, and historical instruments.",
+        ]
+    if dataset_id == "plan_document_code":
+        lines += [
+            "",
+            "CODE HINT:",
+            "- The code often appears in the page header/footer (e.g. A/HRC/RES/14/1, S/RES/2068, "
+            "A/RES/50/195, C098) and may have spaces around slashes in the extracted text.",
+        ]
+
     candidates = _candidate_labels(manifest)
     if candidates:
         lines += ["", "CANDIDATE LABELS (prefer these; labels are human-entered and may vary):"]
         for field, labels in candidates.items():
             lines.append(f"- {field}: {json.dumps(labels, ensure_ascii=False)}")
 
-    if dataset_id in {"upr_state", "upr_recommendations"}:
+    if dataset_id == "upr_recommendations":
         lines += [
             "",
             "STATE/COUNTRY LIST (Uwazi labels; document spellings may differ):",

@@ -16,6 +16,8 @@ from .configuration import WORK_DIR
 
 ALLOWED_IMPORTS = {
     "__future__",
+    "_strptime",
+    "calendar",
     "collections",
     "dataclasses",
     "datetime",
@@ -28,20 +30,32 @@ ALLOWED_IMPORTS = {
     "re",
     "statistics",
     "string",
+    "time",
     "typing",
     "unicodedata",
 }
 BLOCKED_NAMES = {"open", "eval", "exec", "compile", "__import__", "input", "breakpoint"}
 BLOCKED_MODULES = {
     "builtins",
+    "ctypes",
+    "ftplib",
+    "http",
     "importlib",
+    "multiprocessing",
     "os",
     "pathlib",
+    "pickle",
+    "pty",
+    "requests",
     "shutil",
+    "smtplib",
     "socket",
     "subprocess",
     "sys",
+    "telnetlib",
     "tempfile",
+    "urllib",
+    "webbrowser",
 }
 
 RUNNER_SOURCE = r"""
@@ -53,12 +67,12 @@ import signal
 import sys
 import traceback
 
-ALLOWED = %(allowed)r
+BLOCKED = %(blocked)r
 
 class ImportGuard:
     def find_spec(self, fullname, path=None, target=None):
         root = fullname.split(".")[0]
-        if root not in ALLOWED and root not in {"json", "sys", "importlib", "contextlib", "resource", "signal", "traceback"}:
+        if root in BLOCKED:
             raise ImportError("import blocked by sandbox: " + fullname)
         return None
 
@@ -138,7 +152,7 @@ def _root_name(node: ast.AST) -> str:
 
 def _runner_source() -> str:
     return RUNNER_SOURCE % {
-        "allowed": sorted(ALLOWED_IMPORTS),
+        "blocked": sorted(BLOCKED_MODULES),
         "memory_mb": 1024,
         "cpu_seconds": 60,
         "call_seconds": 10,

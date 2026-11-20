@@ -23,7 +23,15 @@ Uwazi metadata. Read `PLAN.md` first. Generated data reports live in `reports/`.
   - `models.py` — `Segment`, `Document`, metadata helpers.
   - `text.py` — document representations (`text`, `segments-tsv`, `segments-json`).
   - `inspect_data.py` — report generator / `inspect-data` CLI.
-- Data dumps: `data/` (gitignored). Outputs: `reports/`, `results/`, `work/` (gitignored).
+  - `catalog.py` — SQLite document/dataset/sample catalog.
+  - `datasets.py` — dataset specs, gold extraction, stable splits.
+  - `normalization.py` — text/number/country normalization and aliases.
+  - `evaluation.py` — Plan field metrics and UPR recommendation matching.
+  - `baselines.py`, `experiments.py` — deterministic baselines and run artifacts.
+  - `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` — LLM script pipeline.
+- `app/app.py` — Streamlit viewer for datasets, samples, methods, runs, comparisons.
+- Data dumps: `data/` (gitignored). Generated artifacts: `artifacts/`, `reports/`,
+  `results/`, `work/` (all gitignored).
 - Tests: `tests/`.
 
 ## Commands
@@ -35,12 +43,17 @@ uv sync --group dev
 
 uv run inspect-data                 # both databases → reports/data_report.md
 uv run inspect-data --db plan
+uv run build-datasets               # catalog + all datasets (rebuild docs unless --skip-documents)
+uv run run-baselines --split dev    # deterministic baselines + run artifacts
+uv run generate-script --dataset plan_year --split dev --model qwen2.5-coder:14b
+uv run streamlit run app/app.py
 uv run pytest -q
-uv run ruff check src tests
-uv run ruff format src tests
+uv run ruff check src tests app
+uv run ruff format src tests app
 ```
 
-`just` recipes exist: `just sync`, `just inspect`, `just test`, `just lint`, `just format`.
+`just` recipes exist: `just sync`, `just build`, `just baselines`, `just app`,
+`just inspect`, `just test`, `just lint`, `just format`.
 
 Secrets are in `.env` (`OLLAMA_BASE_URL`, `OLLAMA_API_KEY`). Never print, log, or commit
 the API key. Do not add `.env` to artifacts. `.env` is gitignored.
@@ -111,6 +124,10 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 - Do not tune prompts/examples on the test split. Examples come from train only.
 - Use temperature 0 for reproducibility unless an experiment explicitly varies it; record
   the exact model id and token usage.
+- Cloud models tested (including `deepseek-v4.1-flash:cloud`) often spend the whole completion
+  budget on hidden `reasoning` and return empty `content`. The pipeline stores
+  `finish_reason`, `reasoning`, and usage; use a local instruct/coder model for now and pass
+  `--model`. Do not silently change the default `MODEL` constant.
 - Direct per-document LLM extraction, if added, is a baseline — label it as such, do not mix
   it into script-generation results.
 
@@ -123,6 +140,11 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   `text.ordered_segments(..., order="layout")`.
 - Page headers/footers can contain useful document codes but are noisy; make it an
   experimental flag.
+- Catalog `segments_json` stores `page`; raw Mongo segmentations store `page_number`.
+  `Segment.from_mongo` accepts both. Do not assume one key name when reconstructing.
+- Some generated scripts split headings across lines (e.g. UPR `Report of the Working
+  Group ...` / `Review *` / `<state>`). A simple "next line" heuristic is fragile; provide
+  segment types/positions or join adjacent header lines.
 - A recommendation number may be alone in a `Table` segment; the text is in the next
   segment. Do not assume `number + text` are in one string.
 - UPR document titles leak the state under review. `document_payload` omits titles by
@@ -130,12 +152,15 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 
 ## Current status / next tasks
 
-M0 (inspection) is complete. Next milestones are in `PLAN.md` §10 and §13:
+The end-to-end prototype is built (catalog/datasets, viewer, baselines, LLM pipeline).
+First results and known issues are in `PLAN.md` §14. Next work:
 
-1. `datasets.py` — task definitions, gold extraction, split manifests, JSONL builder.
-2. `evaluation.py` — Plan field metrics, UPR recommendation alignment/matching.
-3. Tests and a rule-based baseline through the eval harness.
-4. LLM client + prompt templates + sandbox + repair loop.
+1. Improve UPR state/recommendation prompts and representations (segment types).
+2. Run frozen scripts on the test split (do not tune there).
+3. Compare text vs segments/positions on the same dataset.
+4. Add a plain-text/markdown run summary alongside the Streamlit viewer.
+5. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
+   conclusions.
 
 When you finish a meaningful step, regenerate `reports/data_report.md` if data assumptions
 changed, run `ruff` and `pytest`, and record any new data caveat in `PLAN.md` §2.4.

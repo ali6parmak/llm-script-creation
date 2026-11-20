@@ -129,3 +129,11 @@ def test_recommendation_base_ignores_sub_number() -> None:
 def test_recommendation_numbers_ignore_leading_zero_artifacts() -> None:
     # PDF extraction inserts spaces inside paragraph references: "1 02.80".
     assert recommendation_numbers_in_text("paragraphs 1 02.80 , 1 02.81 of the second cycle") == []
+
+
+def test_segment_from_mongo_accepts_catalog_page_key() -> None:
+    segment_item = Segment.from_mongo(
+        {"text": "hello", "page": 3, "top": 10, "left": 20, "type": "Text"}
+    )
+    assert segment_item.page == 3
+    assert segment_item.text == "hello"

@@ -102,29 +102,81 @@ def _output_issues(dataset_id: str, output: Any, fields: list[str]) -> list[str]
     return [f"missing field `{field}`" for field in fields if field not in output]
 
 
-def _smoke_error(
+def _smoke_check(
     script: str,
     dataset_id: str,
     fields: list[str],
     payloads: list[dict[str, Any]],
-) -> tuple[str | None, int | None, str | None]:
+    golds: list[dict[str, Any]],
+) -> tuple[str | None, int | None, str | None, str | None]:
     results = list(
         sandbox.iter_results(script, payloads, chunk_size=max(1, len(payloads)), timeout=120)
     )
+    outputs = [result.get("output") for result in results]
     for index, result in enumerate(results):
         if not result.get("ok"):
-            return result.get("error", "unknown script error"), index, None
+            return result.get("error", "unknown script error"), index, None, None
         issues = _output_issues(dataset_id, result.get("output"), fields)
         if issues:
             return (
                 "invalid output: " + "; ".join(issues),
                 index,
                 json.dumps(result.get("output"), ensure_ascii=False)[:800],
+                json.dumps(golds[index], ensure_ascii=False)[:800] if index < len(golds) else None,
             )
-    return None, None, None
+
+    # A syntactically valid script can still be semantically wrong (e.g. a regex
+    # capturing group returning "20" instead of 2020). Check a few dev examples
+    # and feed the first mismatch back into the repair loop.
+    hits = 0
+    notes = []
+    for index, output in enumerate(outputs):
+        gold = golds[index] if index < len(golds) else {}
+        if dataset_id == "upr_recommendations":
+            details = evaluate_upr_sample(gold, output)
+            if details["metrics"]["matched"] > 0:
+                hits += 1
+            else:
+                notes.append(
+                    f"document {index}: no recommendation matched; gold has "
+                    f"{details['metrics']['gold_count']} recommendations"
+                )
+        elif dataset_id == "upr_state":
+            details = evaluate_upr_state_sample(gold, output)
+            if details["state_correct"]:
+                hits += 1
+            else:
+                notes.append(
+                    f"document {index}: expected state {gold.get('state_under_review')!r}, "
+                    f"got {output.get('state_under_review') if isinstance(output, dict) else output!r}"
+                )
+        else:
+            details = evaluate_plan_sample(gold, output, fields)
+            if details["status"] == "hit":
+                hits += 1
+            else:
+                notes.append(
+                    f"document {index}: expected {json.dumps(gold, ensure_ascii=False)}, "
+                    f"got {json.dumps(output, ensure_ascii=False)[:300]}"
+                )
+    if outputs and hits == 0:
+        return (
+            "smoke predictions are valid JSON but do not match any dev gold example",
+            None,
+            json.dumps(outputs[0], ensure_ascii=False)[:800] if outputs else None,
+            json.dumps(golds[0], ensure_ascii=False)[:800] if golds else None,
+        )
+    if notes:
+        print(f"  smoke quality: {hits}/{len(outputs)} hit; first miss: {notes[0]}", flush=True)
+    return None, None, None, None
 
 
-def _feedback(error: str, payload: dict[str, Any] | None, output: str | None) -> str:
+def _feedback(
+    error: str,
+    payload: dict[str, Any] | None,
+    output: str | None,
+    expected: str | None,
+) -> str:
     parts = [
         "The previous script did not pass the smoke test.",
         f"Error: {error}",
@@ -137,6 +189,8 @@ def _feedback(error: str, payload: dict[str, Any] | None, output: str | None) ->
         )
     if output is not None:
         parts.append(f"Output produced:\n```json\n{output}\n```")
+    if expected is not None:
+        parts.append(f"Expected output for that example:\n```json\n{expected}\n```")
     parts.append(
         "Fix the script. It must still define `extract(document)`, use no I/O, and return "
         "the required shape. Return the complete corrected file in one python code block."
@@ -284,6 +338,7 @@ def generate(
         if limit is not None:
             samples = samples[:limit]
         smoke_samples = samples[:3]
+        smoke_golds = [json.loads(sample["gold_json"]) for sample in smoke_samples]
         smoke_payloads = [
             _payload(
                 dict(catalog.get_document(conn, dataset["db"], sample["doc_id"])),
@@ -312,11 +367,11 @@ def generate(
             issues = sandbox.validate_script(code)
             error = None
             if not issues:
-                error, failing_index, output = _smoke_error(
-                    code, dataset_id, fields, smoke_payloads
+                error, failing_index, output, expected = _smoke_check(
+                    code, dataset_id, fields, smoke_payloads, smoke_golds
                 )
             else:
-                failing_index, output = None, None
+                failing_index, output, expected = None, None, None
             attempts.append(
                 {
                     "attempt": attempt,
@@ -351,15 +406,19 @@ def generate(
                 {"role": "assistant", "content": response.content},
                 {
                     "role": "user",
-                    "content": _feedback(error or "; ".join(issues), failed_payload, output),
+                    "content": _feedback(
+                        error or "; ".join(issues), failed_payload, output, expected
+                    ),
                 },
             ]
 
         prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:12]
         now = datetime.now(UTC).isoformat()
         flags = "pos" if include_position else "nopos"
+        model_slug = re.sub(r"[^a-z0-9]+", "_", model.casefold()).strip("_")
         method_id = (
-            f"llm_{dataset_id}_{representation}_{flags}_{examples_count}ex_{prompt_hash[:6]}"
+            f"llm_{dataset_id}_{representation}_{flags}_{examples_count}ex_"
+            f"{model_slug}_{prompt_hash[:6]}"
         )
         method = {
             "method_id": method_id,
