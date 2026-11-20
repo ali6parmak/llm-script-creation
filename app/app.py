@@ -898,6 +898,10 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
             with columns[index % 3]:
                 st.markdown(method_card(method, run_index, dataset), unsafe_allow_html=True)
 
+    method_comparison_table(methods, run_index, dataset)
+
+    st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
+    st.subheader("Method detail")
     selected = st.selectbox(
         "Open method",
         [method["method_id"] for method in methods],
@@ -908,7 +912,6 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
     )
     method = next(item for item in methods if item["method_id"] == selected)
     render_method_detail(method, dataset, run_index, selected)
-    method_comparison_table(methods, run_index, dataset)
 
 
 def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
