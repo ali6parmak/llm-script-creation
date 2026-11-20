@@ -107,6 +107,7 @@ def _rebuild_semantics() -> None:
         {
             "rule_based": PALETTE["blue"],
             "llm_script": PALETTE["purple"],
+            "admin_agent_extractor": PALETTE["orange"],
             "single_label": PALETTE["aqua"],
             "numeric": PALETTE["yellow"],
             "string": PALETTE["orange"],

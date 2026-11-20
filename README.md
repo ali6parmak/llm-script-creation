@@ -33,6 +33,47 @@ Generate an LLM script, repair it on train, then evaluate the frozen script on t
 uv run generate-script --dataset plan_year --examples 2 --max-repair-rounds 4
 ```
 
+## Admin-agent extractor (read-only evaluation)
+
+This is a different strategy from `generate-script`: instead of asking the LLM to write a
+script for our prompt, we run the **real Uwazi admin agent's nested extractor subagent**
+(`uwazi_admin_agent.use_cases.author_extractor_tool.build_extractor_agent`) over our Plan
+data, then execute the returned `def extract(text, ctx)` with the admin agent's own sandbox.
+
+Phase 1 uses the admin agent as-is (its model, its prompt, its tools). Title and Uwazi
+metadata stay visible: that is the **production-context** condition. The extractor is
+authored from the train split only; the untouched test split is used for one final execution.
+
+The admin agent keeps its own environment through a sidecar process
+(`scripts/admin_agent_sidecar.py`, run with `~/projects/python_uwazi_API/.venv`). Our main
+process never imports `uwazi_admin_agent`, never writes to MongoDB, and never calls a live
+Uwazi instance.
+
+```bash
+# spike: author + execute on 5 train / 5 test documents
+uv run benchmark-admin-agent --dataset plan_year --limit-train 5 --limit-test 5
+
+# full phase-1 run: the real 50-document train split and the whole test split
+uv run benchmark-admin-agent --dataset plan_year
+```
+
+The admin repo's `.venv` currently predates two dependencies declared in its `pyproject.toml`
+(`rapidfuzz`, `python-dateutil`). Rather than modify that read-only repo, the sidecar layers
+them into a benchmark-local directory:
+
+```bash
+export UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache}
+uv pip install --target work/admin_agent_extra \
+  --python ~/projects/python_uwazi_API/.venv/bin/python \
+  "rapidfuzz==3.14.6" "python-dateutil==2.9.0.post0"
+```
+
+The method type is `admin_agent_extractor`; artifacts land under
+`artifacts/methods/<method_id>/` (task prompt, extractor source, attempt with the admin
+agent's tool-call transcript) and `artifacts/runs/<run_id>/` (predictions, our Plan metrics,
+the admin agent's own `extraction_eval` view, and model usage). Nothing is written to the
+`plan` / `upr` databases.
+
 ## Split policy `v2-50train`
 
 There is no `dev` split. Each dataset has:

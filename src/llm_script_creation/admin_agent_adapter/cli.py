@@ -1,0 +1,481 @@
+"""``benchmark-admin-agent``: evaluate the real admin agent's extractor strategy.
+
+Flow (nothing is written to Mongo or Uwazi):
+
+1. read the catalog (dataset spec + train/test samples) and the real Uwazi
+   template from the local restored database (read-only);
+2. write an AUTHOR request containing the train documents ONLY, run the
+   sidecar with the admin agent's venv, and receive the authored extractor;
+3. write an EXECUTE request with train + test documents, run the sidecar again,
+   and receive one prediction per document (plus the admin agent's own scoring
+   over test);
+4. score with our Plan evaluator and write method/run artifacts.
+
+Phase 1 covers single Plan fields (``plan_year`` first).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from bson import ObjectId
+
+from .. import catalog, runs
+from ..configuration import CATALOG_PATH, WORK_DIR
+from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
+from . import evaluate, prompt, records
+
+TYPE = "admin_agent_extractor"
+DOCUMENT_TEMPLATE_BY_DB = {"plan": PLAN_DOCUMENT_TEMPLATE, "upr": UPR_DOCUMENT_TEMPLATE}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
+    row = catalog.get_dataset(conn, dataset_id)
+    if row is None:
+        raise SystemExit(f"Unknown dataset: {dataset_id}")
+    data = dict(row)
+    data["manifest"] = records.load_json(data.get("manifest_json"), {})
+    data["target_schema"] = records.load_json(data.get("target_schema_json"), {})
+    if data["db"] != "plan":
+        raise SystemExit(
+            "Phase 1 supports Plan fields only; UPR state/recommendations are later phases "
+            f"(dataset {dataset_id!r} is in db {data['db']!r})."
+        )
+    # The catalog keeps the dataset spec but not its template id; the document
+    # template is a per-database constant in db.py.
+    data["template"] = DOCUMENT_TEMPLATE_BY_DB[data["db"]]
+    return data
+
+
+def _load_template(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Read the real template from Mongo (read-only) and keep it JSON-safe."""
+    template_id = dataset["template"]
+    raw = get_db(dataset["db"]).templates.find_one({"_id": ObjectId(template_id)})
+    if raw is None:
+        raise SystemExit(f"Template {template_id!r} not found in db {dataset['db']!r}")
+    properties = [
+        {
+            "name": prop.get("name") or "",
+            "label": prop.get("label") or "",
+            "type": prop.get("type") or "text",
+            "required": bool(prop.get("required")),
+            "filter": bool(prop.get("filter")),
+            "showInCard": bool(prop.get("showInCard")),
+            "content": prop.get("content"),
+        }
+        for prop in raw.get("properties") or []
+    ]
+    return {
+        "name": raw.get("name") or "",
+        "template_id": template_id,
+        "color": raw.get("color") or "",
+        "properties": properties,
+    }
+
+
+def _rows(conn: Any, dataset_id: str, split: str, limit: int | None) -> list[dict[str, Any]]:
+    rows = sorted(
+        (dict(row) for row in catalog.iter_samples(conn, dataset_id, split=split)),
+        key=lambda row: row["doc_id"],
+    )
+    return rows[:limit] if limit is not None else rows
+
+
+def _record(conn: Any, dataset: dict[str, Any], sample: dict[str, Any], template: dict[str, Any]) -> dict[str, Any] | None:
+    doc_row = catalog.get_document(conn, dataset["db"], sample["doc_id"])
+    if doc_row is None:
+        return None
+    doc_row = dict(doc_row)
+    segments = records.load_json(doc_row.get("segments_json"), [])
+    if not segments:
+        return None
+    filename = doc_row.get("filename") or f"{doc_row['doc_id']}.pdf"
+    return {
+        "doc_id": doc_row["doc_id"],
+        "shared_id": doc_row["doc_id"],
+        "split": sample["split"],
+        "title": doc_row.get("title") or "",
+        "template_id": dataset["template"],
+        "template_name": template["name"],
+        "language": doc_row.get("language") or "en",
+        "metadata": records.load_json(doc_row.get("metadata_json"), {}),
+        "segments": segments,
+        "file_id": doc_row.get("file_id"),
+        "filename": filename,
+        "originalname": filename,
+        "mimetype": doc_row.get("mimetype") or "application/pdf",
+        "gold": records.load_json(sample.get("gold_json"), {}),
+    }
+
+
+def _allowed_values(property_type: str, train_records: list[dict[str, Any]], field: str) -> list[str] | None:
+    if property_type != "select":
+        return None
+    values = {
+        str(gold[field])
+        for record in train_records
+        for gold in [record.get("gold") or {}]
+        if gold.get(field) is not None and str(gold[field]).strip()
+    }
+    return sorted(values)
+
+
+def _write_execute_sample(handle: Any, record: dict[str, Any]) -> None:
+    """Write one payload line (everything except our gold wrapper)."""
+    payload = {key: value for key, value in record.items() if key != "gold"}
+    handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def _admin_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    repo = _repo_root()
+    admin_src = Path(
+        env.get("UWAZI_ADMIN_SRC") or (Path.home() / "projects" / "python_uwazi_API" / "src")
+    )
+    paths = [str(repo / "src"), str(admin_src)]
+    extra = WORK_DIR / "admin_agent_extra"
+    if extra.exists():
+        # The admin repo's .venv predates rapidfuzz/python-dateutil in its
+        # pyproject. We must not modify the read-only repo, so the locked deps
+        # live in a sidecar-only target dir instead.
+        paths.append(str(extra))
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+    return env
+
+
+def _admin_python() -> Path:
+    raw = os.environ.get("UWAZI_ADMIN_PYTHON")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "projects" / "python_uwazi_API" / ".venv" / "bin" / "python"
+
+
+def _preflight() -> None:
+    """Fail with an actionable message instead of a cryptic sidecar import error."""
+    python = _admin_python()
+    if not python.exists():
+        raise SystemExit(
+            f"Admin agent venv not found at {python}. Set UWAZI_ADMIN_PYTHON or run "
+            "`uv sync` in ~/projects/python_uwazi_API."
+        )
+    admin_src = Path(
+        os.environ.get("UWAZI_ADMIN_SRC")
+        or (Path.home() / "projects" / "python_uwazi_API" / "src")
+    )
+    if not admin_src.exists():
+        raise SystemExit(f"Admin agent source not found at {admin_src}. Set UWAZI_ADMIN_SRC.")
+    check = subprocess.run(
+        [str(python), "-c", "import rapidfuzz, dateutil"],
+        env=_admin_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check.returncode != 0:
+        raise SystemExit(
+            "The admin agent venv cannot import its extraction dependencies "
+            "(rapidfuzz/python-dateutil). The admin repo is read-only here, so layer them "
+            "into a sidecar-only directory instead:\n\n"
+            "  export UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache}\n"
+            f"  uv pip install --target {WORK_DIR / 'admin_agent_extra'} \\\n"
+            f"    --python {python} \\\n"
+            '    "rapidfuzz==3.14.6" "python-dateutil==2.9.0.post0"\n'
+        )
+
+
+def _invoke_sidecar(mode: str, request: dict[str, Any], directory: Path) -> dict[str, Any]:
+    """Write a request JSON, run the sidecar with the admin venv, read the response."""
+    script = _repo_root() / "scripts" / "admin_agent_sidecar.py"
+    request_path = directory / f"{mode}_request.json"
+    response_path = directory / f"{mode}_response.json"
+    records.write_json(request_path, request)
+    command = [str(_admin_python()), str(script), "--mode", mode, "--request", str(request_path), "--response", str(response_path)]
+    timeout = float(os.environ.get("ADMIN_AGENT_TIMEOUT", "2400"))
+    completed = subprocess.run(
+        command,
+        cwd=str(_repo_root()),
+        env=_admin_env(),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode != 0:
+        tail = (completed.stderr or completed.stdout or "").strip()[-4000:]
+        raise SystemExit(
+            f"sidecar {mode} failed (exit {completed.returncode}).\n"
+            f"request: {request_path}\nstderr tail:\n{tail}"
+        )
+    if not response_path.exists():
+        raise SystemExit(f"sidecar {mode} produced no response at {response_path}")
+    return records.read_json(response_path)
+
+
+def _sidecar_usage(response: dict[str, Any]) -> dict[str, Any]:
+    usage = dict(response.get("usage") or {})
+    usage.setdefault("model", response.get("model"))
+    usage.setdefault("base_url", response.get("base_url"))
+    return usage
+
+
+def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dict[str, Any]:
+    conn = catalog.connect()
+    try:
+        dataset = _load_dataset(conn, dataset_id)
+        template = _load_template(dataset)
+        fields = list(dataset["target_schema"])
+        if len(fields) != 1:
+            raise SystemExit(f"Phase 1 supports single-field datasets, got {fields}")
+        field = fields[0]
+        properties = {prop["name"]: prop for prop in template["properties"]}
+        if field not in properties:
+            raise SystemExit(f"Field {field!r} is not a property of template {template['name']!r}")
+        property_type = properties[field]["type"]
+
+        train_rows = _rows(conn, dataset_id, "train", limit_train)
+        test_rows = _rows(conn, dataset_id, "test", limit_test)
+        train_records = [r for r in (_record(conn, dataset, row, template) for row in train_rows) if r]
+        if not train_records:
+            raise SystemExit("No train documents with segmentation found.")
+        if not test_rows:
+            raise SystemExit("No test documents with segmentation found.")
+    finally:
+        conn.close()
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    directory = WORK_DIR / "admin_agent" / f"{stamp}_{runs.slug(dataset_id)}"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    task_prompt = prompt.build_author_task(
+        dataset_id=dataset_id,
+        property_name=field,
+        property_type=property_type,
+        template_name=template["name"],
+        train_shared_ids=[record["shared_id"] for record in train_records],
+        train_total=len(train_records),
+        allowed_values=_allowed_values(property_type, train_records, field),
+    )
+    author_request = {
+        "mode": "author",
+        "dataset_id": dataset_id,
+        "max_requests": int(os.environ.get("ADMIN_AGENT_MAX_REQUESTS", "40")),
+        "task_prompt": task_prompt,
+        "template": template,
+        "train_entities": [
+            {key: value for key, value in record.items() if key != "gold"} for record in train_records
+        ],
+    }
+    print(f"Authoring via admin agent on {len(train_records)} train documents …", flush=True)
+    author = _invoke_sidecar("author", author_request, directory)
+    if author.get("status") != "ok":
+        print(json.dumps({k: author.get(k) for k in ("status", "error", "validation", "model")}, indent=2))
+        raise SystemExit(f"Admin agent did not return a valid extractor (see {directory})")
+    extractor = author["extractor"]
+    code = extractor["python_code"]
+    print(
+        f"  model {author.get('model')} · requests {author.get('usage', {}).get('requests')} · "
+        f"tokens {author.get('usage', {}).get('total_tokens')} · "
+        f"samples {extractor.get('samples_matched')}/{extractor.get('samples_total')}",
+        flush=True,
+    )
+
+    # The full Plan test split does not fit in one JSON request, so payloads are
+    # streamed as JSONL: one document per line, built from the catalog one row at
+    # a time and never held all in memory. Test documents appear ONLY here.
+    execute_path = directory / "execute_samples.jsonl"
+    expected: dict[str, dict[str, Any]] = {}
+    sample_meta: list[dict[str, Any]] = []
+    for record in train_records:
+        expected[record["doc_id"]] = record["gold"]
+        sample_meta.append(
+            {"doc_id": record["doc_id"], "split": record["split"], "gold": record["gold"]}
+        )
+    test_count = 0
+    print(f"Preparing execution payloads for {len(test_rows):,} test rows …", flush=True)
+    exec_conn = catalog.connect()
+    try:
+        with execute_path.open("w", encoding="utf-8") as handle:
+            for record in train_records:
+                _write_execute_sample(handle, record)
+            for row in test_rows:
+                record = _record(exec_conn, dataset, row, template)
+                if record is None:
+                    continue
+                _write_execute_sample(handle, record)
+                expected[record["doc_id"]] = record["gold"]
+                sample_meta.append(
+                    {"doc_id": record["doc_id"], "split": "test", "gold": record["gold"]}
+                )
+                test_count += 1
+                if test_count % 1000 == 0:
+                    print(f"  prepared {test_count:,} test documents", flush=True)
+    finally:
+        exec_conn.close()
+    if not test_count:
+        raise SystemExit("No test documents with segmentation found.")
+
+    execute_request = {
+        "mode": "execute",
+        "extractor_source": code,
+        "samples_path": str(execute_path),
+        "score": {
+            "property_names": [field],
+            "expected": expected,
+            "policy": "normalized",
+        },
+    }
+    print(
+        f"Executing extractor on {len(train_records)} train + {test_count:,} test documents …",
+        flush=True,
+    )
+    execution = _invoke_sidecar("execute", execute_request, directory)
+    if execution.get("status") != "ok":
+        raise SystemExit(f"Extractor execution failed: {execution.get('error')}")
+
+    predictions = {item["doc_id"]: item for item in execution.get("predictions") or []}
+    samples = sample_meta
+    scored_records, metrics = evaluate.score_records(dataset_id, [field], samples, predictions)
+    usage = _sidecar_usage(author)
+    metrics["token_usage"] = usage
+    metrics["admin_eval"] = execution.get("admin_eval")
+    metrics["admin_agent"] = {
+        "model": author.get("model"),
+        "base_url": author.get("base_url"),
+        "extractor_samples_total": extractor.get("samples_total"),
+        "extractor_samples_matched": extractor.get("samples_matched"),
+        "unmatched_notes": extractor.get("unmatched_notes"),
+        "description": extractor.get("description"),
+        "usage": usage,
+        "tool_calls": author.get("tool_calls"),
+    }
+    metrics["method_notes"] = (
+        "Production-context condition: the extractor sees title and metadata. "
+        "Authored on train documents only; executed once on the untouched test split."
+    )
+
+    now = datetime.now(UTC).isoformat()
+    model_slug = runs.slug(str(author.get("model") or "unknown"))
+    method_id = f"admin_agent_{dataset_id}_{model_slug}"
+    config = {
+        "condition": "production_context",
+        "title_visible": True,
+        "metadata_visible": True,
+        "source": "primary-document segmentation",
+        "template_name": template["name"],
+        "template_id": dataset["template"],
+        "property_name": field,
+        "property_type": property_type,
+        "admin_agent_model": author.get("model"),
+        "admin_agent_base_url": author.get("base_url"),
+        "max_requests": author_request["max_requests"],
+        "extractor_samples_matched": extractor.get("samples_matched"),
+        "extractor_samples_total": extractor.get("samples_total"),
+        "authoring_documents": len(train_records),
+        "execution_documents": len(train_records) + test_count,
+        "request_files": str(directory),
+    }
+    method = evaluate.build_method(
+        method_id=method_id,
+        name=f"Admin agent extractor — {dataset_id}",
+        description=(
+            "The real Uwazi admin agent's nested extractor subagent authors `def extract(text, ctx)` "
+            "from primary-document segmentation on the train split (title and metadata visible = "
+            "production context), then the frozen function runs once over train and test. Scored "
+            "against real Uwazi metadata with our Plan evaluator."
+        ),
+        dataset_id=dataset_id,
+        task=dataset["task"],
+        model=str(author.get("model") or ""),
+        extractor_code=code,
+        prompt=task_prompt,
+        manifest=dataset["manifest"],
+        config=config,
+        usage=usage,
+        primary=metrics["primary"],
+        train_documents=len(train_records),
+        test_documents=test_count,
+        created_at=now,
+    )
+    attempt = {
+        "round": 1,
+        "kind": "admin_agent_author",
+        "model": author.get("model"),
+        "usage": usage,
+        "validation_issues": [] if not author.get("validation") else [author["validation"]],
+        "train_score": metrics["primary"]["train"],
+        "train_nonexample_score": None,
+        "code": code,
+        "response": extractor.get("description") or "",
+        "transcript": author.get("transcript") or [],
+        "extractor": {
+            key: value for key, value in extractor.items() if key != "python_code"
+        },
+        "empty_response": bool(author.get("empty_output")),
+    }
+    runs.write_method(method, prompt=task_prompt, script=code, attempts=[attempt])
+
+    run_id = runs.new_run_id(method_id, dataset_id, "train_test")
+    run = evaluate.build_run(
+        run_id=run_id,
+        method_id=method_id,
+        dataset_id=dataset_id,
+        status="completed",
+        created_at=now,
+        counts=metrics["status_counts"]["test"],
+        metrics=metrics,
+        manifest=dataset["manifest"],
+        usage=usage,
+    )
+    runs.write_run(run, scored_records, metrics, prompt=task_prompt, script=code)
+
+    primary = metrics["primary"]
+    admin_eval = execution.get("admin_eval") or {}
+    print(f"\nRun: {run_id}")
+    print(
+        f"  train {primary['train']:.3f} · test {primary['test']:.3f} · gap {primary['gap']:+.3f} · "
+        f"test statuses {metrics['status_counts']['test']}",
+        flush=True,
+    )
+    if admin_eval:
+        accuracy = admin_eval.get("accuracy")
+        print(
+            "  admin-agent eval: "
+            + ("n/a" if accuracy is None else f"accuracy {100 * accuracy:.1f}%")
+            + f" · coverage {100 * (admin_eval.get('coverage') or 0):.1f}%"
+            + f" · mismatched {admin_eval.get('mismatched')} · missing {admin_eval.get('missing')}",
+            flush=True,
+        )
+    print(f"  requests: {directory}", flush=True)
+    return {"run": run, "metrics": metrics, "method": method, "request_dir": str(directory)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", required=True, help="single-field Plan dataset id, e.g. plan_year")
+    parser.add_argument("--limit-train", type=int, default=None, help="limit train documents (spike)")
+    parser.add_argument("--limit-test", type=int, default=None, help="limit test documents (spike)")
+    args = parser.parse_args(argv)
+
+    if not CATALOG_PATH.exists():
+        raise SystemExit("Catalog missing. Run `uv run build-datasets` first.")
+    _preflight()
+    result = run(args.dataset, args.limit_train, args.limit_test)
+    print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

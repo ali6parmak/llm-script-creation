@@ -15,6 +15,7 @@ inspect-data = "llm_script_creation.inspect_data:main"
 build-datasets = "llm_script_creation.datasets:main"
 run-baselines = "llm_script_creation.experiments:main"
 generate-script = "llm_script_creation.generate:main"
+benchmark-admin-agent = "llm_script_creation.admin_agent_adapter.cli:main"
 
 [dependency-groups]
 dev = [

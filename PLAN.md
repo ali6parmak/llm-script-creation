@@ -526,6 +526,7 @@ uv run inspect-data --db plan
 | LLM client + sandbox + full-train repair loop | `llm.py`, `sandbox.py`, `generate.py` | done |
 | Per-round and final artifacts | `runs.py`, `artifacts/methods`, `artifacts/runs` | done |
 | Viewer theming | `app/theme.py`, `.streamlit/config.toml` | done |
+| Real admin agent's nested extractor (read-only sidecar) | `admin_agent_adapter/`, `scripts/admin_agent_sidecar.py` | phase 1 (Plan single fields) |
 
 Commands:
 
@@ -592,6 +593,56 @@ their excerpt on the relevant transformed-input content (see the focus note belo
   state 0.895.
 - segments + position/type: P 0.952 / R 0.938 / F1 0.945; text F1 0.993; country 0.927;
   exact number 0.997; state 0.000.
+
+### Admin-agent extractor (read-only adapter, phase 1)
+
+A different strategy from `generate-script`: instead of prompting our own pipeline, run the
+real Uwazi admin agent's nested extractor subagent
+(`uwazi_admin_agent.use_cases.author_extractor_tool.build_extractor_agent`) against our Plan
+data, then execute the returned `def extract(text, ctx)` with the admin agent's own
+`extractor_sandbox`. The admin agent is used as-is: its system prompt, its tools, its model
+(`deepseek-v4.1-flash:1017-cloud` via `OllamaAdapter`), and its `benchmark_extractor`.
+
+What is held fixed:
+
+- **Condition:** production context — title and Uwazi metadata remain visible. A strict
+  no-title condition is a later experiment.
+- **Source:** the primary-document segmentation, with exactly the admin agent's
+  document-extraction input: `"\n".join(p["text"] for p in seg["paragraphs"])` (catalog
+  segments are already page/reading ordered). `ctx` is the admin agent's own
+  `build_context(entity)`.
+- **Split:** the existing v2-50train split. The authoring request contains the 50 train
+  documents only; test documents are written only to the execution payload.
+- **Read-only:** the sidecar has no Mongo/Uwazi client and no network fetcher. Every port
+  write raises `NotImplementedError`. The admin repo is never modified.
+
+The admin agent keeps its own environment through `scripts/admin_agent_sidecar.py`, invoked
+with `~/projects/python_uwazi_API/.venv`. Our process never imports `uwazi_admin_agent`.
+
+```bash
+# spike
+uv run benchmark-admin-agent --dataset plan_year --limit-train 5 --limit-test 5
+# full phase-1 run
+uv run benchmark-admin-agent --dataset plan_year
+```
+
+The admin repo's `.venv` (created 2026-08-25) predates two dependencies now declared in its
+`pyproject.toml`, so importing `uwazi_admin_agent.domain.text_match` fails at
+`rapidfuzz`. Rather than touch the read-only repo, the sidecar layers the exact locked
+versions into `work/admin_agent_extra`; the CLI preflight prints the install command if that
+directory is missing.
+
+Artifacts use method type `admin_agent_extractor`: `method.json` records the condition,
+template/property, admin model and total usage, `prompt.txt` is the exact authoring task,
+`script.py` is the returned extractor, `attempts/attempt-1.json` carries the extractor's
+samples stats and a clipped tool-call transcript. The run records our Plan metrics, the admin
+agent's own `extraction_eval` score, and per-document predictions. Nothing is written to
+MongoDB.
+
+**Status:** phase 1 covers single Plan fields. UPR `state_reviewed` is a relationship
+property (it needs State sharedIds, not just a label) and UPR recommendations are
+record-creation tasks, so neither is attempted here. The full `GenerateScriptUseCase`
+bulk-script path is out of scope by design.
 
 ### What the v2 numbers show
 
