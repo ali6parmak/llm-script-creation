@@ -368,12 +368,20 @@ def _repair_feedback(
             segment_limit=12,
             focuses=_failure_focuses(dataset_id, gold),
         )
-        label = "transformed input excerpt" if truncated else "transformed input"
         block = "```text" if spec.representation == "text" else "```json"
+        if truncated:
+            input_label = (
+                "Transformed input excerpt (from the input the script receives: "
+                f"{spec.describe()}):"
+            )
+        else:
+            input_label = (
+                "Transformed input (this is exactly what the script receives: "
+                f"{spec.describe()}):"
+            )
         section = [
             f"FAILURE {index} — document {record['doc_id']} — status: {record.get('status')}",
-            f"{label.capitalize()} (exactly the input the script receives: {spec.describe()}):\n"
-            f"{block}\n{excerpt}\n```",
+            f"{input_label}\n{block}\n{excerpt}\n```",
             f"Gold output:\n```json\n{_display_gold(dataset_id, gold)}\n```",
         ]
         if record.get("prediction") is not None:

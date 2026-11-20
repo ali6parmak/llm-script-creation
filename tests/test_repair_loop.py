@@ -262,3 +262,32 @@ def test_failure_focuses_include_recommendation_base_number() -> None:
     )
     assert "140.1.1" in focuses
     assert "140.1" in focuses
+
+
+def test_repair_feedback_labels_excerpts_clearly(monkeypatch) -> None:
+    row = _catalog_row("doc")
+    monkeypatch.setattr(generate.catalog, "get_document", lambda *args: row)
+    state = {
+        "score": 0.5,
+        "document_count": 50,
+        "failure_count": 1,
+        "issues": [],
+        "empty_response": False,
+        "selected": [record("doc", "wrong", gold={"year": 2020})],
+    }
+    short = generate._repair_feedback(
+        "plan_year", 1, state, None, {"db": "plan", "target_schema": {"year": {}}}, generate.InputSpec()
+    )
+    assert "Transformed input (this is exactly what the script receives" in short
+
+    row_long = dict(
+        row,
+        segments_json=json.dumps(
+            [{"text": "x" * 5000, "page": 1, "top": 0, "left": 0}]
+        ),
+    )
+    monkeypatch.setattr(generate.catalog, "get_document", lambda *args: row_long)
+    long = generate._repair_feedback(
+        "plan_year", 1, state, None, {"db": "plan", "target_schema": {"year": {}}}, generate.InputSpec()
+    )
+    assert "Transformed input excerpt (from the input the script receives" in long
