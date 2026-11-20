@@ -13,6 +13,12 @@ sync:
 inspect:
     UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run inspect-data
 
+build:
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run build-datasets
+
+app:
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run streamlit run app/app.py
+
 test:
     UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run pytest -q
 

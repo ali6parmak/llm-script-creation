@@ -21,6 +21,8 @@ uv sync --group dev
 
 uv run inspect-data                 # writes reports/data_report.{md,json}
 uv run inspect-data --db plan
+uv run build-datasets               # snapshots documents + builds every dataset
+uv run streamlit run app/app.py     # dataset/sample viewer
 uv run pytest -q
 uv run ruff check src tests
 ```
