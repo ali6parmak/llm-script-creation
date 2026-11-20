@@ -1,6 +1,8 @@
 # PLAN — LLM-written extraction scripts for Uwazi documents
 
-**Status:** end-to-end prototype built (catalog/datasets, viewer, baselines, LLM pipeline). First experiments run; next is prompt/model iteration and deeper analysis.
+**Status:** v2 benchmark built (v2-50train stratified splits, shared `InputSpec`, train/test
+baselines, full-train repair loop, per-round artifacts). Final v2 results are in §14; next is
+fixing the UPR segment-state failure and hardening repair against invalid responses.
 **Last updated:** 2026-11-20.
 
 ## 1. Context and goal
