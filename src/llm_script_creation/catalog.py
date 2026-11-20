@@ -130,6 +130,8 @@ def insert_dataset(
             dataset.get("created_at"),
         ),
     )
+    # Replace the whole sample set: rebuilt splits must not leave stale rows.
+    conn.execute("DELETE FROM samples WHERE dataset_id = ?", (dataset["dataset_id"],))
     count = 0
     for sample in samples:
         conn.execute(
@@ -154,7 +156,6 @@ def list_datasets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             SELECT d.*,
                    COUNT(s.doc_id) AS sample_count,
                    SUM(CASE WHEN s.split = 'train' THEN 1 ELSE 0 END) AS train_count,
-                   SUM(CASE WHEN s.split = 'dev' THEN 1 ELSE 0 END) AS dev_count,
                    SUM(CASE WHEN s.split = 'test' THEN 1 ELSE 0 END) AS test_count
             FROM datasets d
             LEFT JOIN samples s ON s.dataset_id = d.dataset_id

@@ -40,26 +40,182 @@ from .models import metadata_labels, metadata_values
 from .text import ordered_segments, render_text
 
 SEED = 42
-SPLIT_POLICIES = {
-    PLAN_DB: {"train": 0.70, "dev": 0.15, "test": 0.15},
-    UPR_DB: {"train": 0.60, "dev": 0.20, "test": 0.20},
-}
+TRAIN_SIZE = 50
+SPLIT_POLICY_VERSION = "v2-50train"
 DB_TEMPLATES = {
     PLAN_DB: PLAN_DOCUMENT_TEMPLATE,
     UPR_DB: UPR_DOCUMENT_TEMPLATE,
 }
 
+# UPR tasks share one train pool: they ask different questions about the same
+# documents, so training on different documents would make the comparison noisy.
+SHARED_TRAIN_GROUPS = {
+    "upr_state": "upr_shared",
+    "upr_recommendations": "upr_shared",
+}
 
-def split_for(db: str, doc_id: str, seed: int = SEED) -> str:
-    """Deterministic global split assignment for a document."""
-    policy = SPLIT_POLICIES[db]
-    digest = hashlib.sha256(f"{db}:{doc_id}:{seed}".encode()).digest()
-    position = int.from_bytes(digest[:8], "big") / 2**64
-    if position < policy["train"]:
-        return "train"
-    if position < policy["train"] + policy["dev"]:
-        return "dev"
-    return "test"
+SPLIT_RULE = (
+    "Deterministic stratified sample of 50 train documents per dataset: order "
+    "strata rarest-first, pick one document per stratum, then fill the remaining "
+    "slots proportionally to stratum size. Within a stratum, documents are ordered "
+    "by sha256(seed:dataset:sharedId). Test is every remaining eligible document, "
+    "minus any document that is train in another dataset (cross-dataset isolation). "
+    "upr_state and upr_recommendations share the same 50-document pool."
+)
+
+
+def _hash_rank(seed: int, dataset_key: str, doc_id: str) -> bytes:
+    return hashlib.sha256(f"{seed}:{dataset_key}:{doc_id}".encode()).digest()
+
+
+def select_stratified(
+    samples: Iterable[dict[str, Any]],
+    *,
+    dataset_key: str,
+    stratum_key: Callable[[dict[str, Any]], str],
+    train_size: int = TRAIN_SIZE,
+    seed: int = SEED,
+) -> list[str]:
+    """Pick `train_size` document ids deterministically, stratified by `stratum_key`.
+
+    Every stratum is represented once before any stratum gets a second document.
+    The leftover slots are allocated proportionally to stratum size (largest
+    remainder), and ties are broken by the stratum name. This is deterministic
+    and covers rare labels without hand-curating documents.
+    """
+    groups: dict[str, list[str]] = {}
+    for sample in samples:
+        groups.setdefault(stratum_key(sample), []).append(str(sample["doc_id"]))
+    for ids in groups.values():
+        ids.sort(key=lambda doc_id: _hash_rank(seed, dataset_key, doc_id))
+
+    ordered = sorted(groups.items(), key=lambda item: (len(item[1]), item[0]))
+    chosen: list[str] = []
+    for _, ids in ordered:
+        if len(chosen) >= train_size:
+            break
+        chosen.append(ids[0])
+
+    remaining = train_size - len(chosen)
+    if remaining > 0:
+        total = sum(len(ids) for _, ids in ordered)
+        quotas = []
+        for key, ids in ordered:
+            exact = remaining * len(ids) / total
+            quotas.append([key, int(exact), exact - int(exact)])
+        assigned = sum(quota[1] for quota in quotas)
+        for quota in sorted(quotas, key=lambda item: (-item[2], item[0]))[
+            : remaining - assigned
+        ]:
+            quota[1] += 1
+        extras = {quota[0]: quota[1] for quota in quotas}
+        for key, ids in ordered:
+            chosen.extend(ids[1 : 1 + min(extras[key], len(ids) - 1)])
+
+    if len(chosen) < train_size:
+        selected = set(chosen)
+        rest = sorted(
+            (doc_id for ids in groups.values() for doc_id in ids if doc_id not in selected),
+            key=lambda doc_id: _hash_rank(seed, dataset_key, doc_id),
+        )
+        chosen.extend(rest[: train_size - len(chosen)])
+    return sorted(chosen[:train_size])
+
+
+def _year_stratum(value: Any) -> str:
+    try:
+        year = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    return f"{(year // 10) * 10}s"
+
+
+def _month_stratum(value: Any) -> str:
+    try:
+        return f"month-{int(value):02d}"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _code_family(value: Any) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return "unknown"
+    if code[0] == "C" and code[1:].isdigit():
+        return "ILO C"
+    parts = code.split("/")
+    if len(parts) >= 2 and parts[0]:
+        return "/".join(parts[:2])
+    return parts[0][:3] or "unknown"
+
+
+def _number_family(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    if text.isdigit():
+        return "numeric"
+    return "mixed" if any(character.isdigit() for character in text) else "text"
+
+
+def _recommendation_stratum(gold: dict[str, Any]) -> str:
+    recommendations = gold.get("recommendations") or []
+    count = len(recommendations)
+    if count < 150:
+        bucket = "119-149"
+    elif count < 200:
+        bucket = "150-199"
+    elif count < 250:
+        bucket = "200-249"
+    elif count < 300:
+        bucket = "250-299"
+    else:
+        bucket = "300+"
+    subnumbered = any(str(rec.get("number", "")).count(".") >= 2 for rec in recommendations)
+    return f"{bucket}|sub={int(subnumbered)}"
+
+
+def dataset_stratum(dataset_id: str, gold: dict[str, Any]) -> str:
+    """Stratum definition for one dataset; labels/classes where they exist."""
+    if dataset_id in {
+        "plan_document_type",
+        "plan_legal_status",
+        "plan_means_of_adoption",
+        "plan_body",
+    }:
+        field = dataset_id.removeprefix("plan_")
+        return str(gold.get(field) or "unknown")
+    if dataset_id == "plan_all_fields":
+        return str(gold.get("document_type") or "unknown")
+    if dataset_id == "plan_year":
+        return _year_stratum(gold.get("year"))
+    if dataset_id == "plan_field_month":
+        return _month_stratum(gold.get("field_month"))
+    if dataset_id == "plan_document_code":
+        return _code_family(gold.get("document_code"))
+    if dataset_id == "plan_field_document_number":
+        return _number_family(gold.get("field_document_number"))
+    if dataset_id == "upr_recommendations":
+        return _recommendation_stratum(gold)
+    if dataset_id == "upr_state":
+        return "state"
+    return "all"
+
+
+def stratum_description(dataset_id: str) -> str:
+    return {
+        "plan_document_type": "Uwazi document type label",
+        "plan_legal_status": "legal status label",
+        "plan_means_of_adoption": "means of adoption label",
+        "plan_body": "issuing body label",
+        "plan_all_fields": "document type label",
+        "plan_year": "decade (1940s … 2020s)",
+        "plan_field_month": "month 1-12",
+        "plan_document_code": "document-code family (A/HRC, A/RES, S/RES, E/CN.4, ILO C, ...)",
+        "plan_field_document_number": "numeric / mixed / text document number",
+        "upr_recommendations": "recommendation-count bucket × sub-numbered recommendations",
+        "upr_state": "shared UPR pool: recommendation-count bucket × sub-numbered recommendations",
+    }.get(dataset_id, "single stratum")
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +600,94 @@ def _label_distribution(spec: DatasetSpec, samples: list[dict[str, Any]]) -> dic
     return distribution
 
 
+def select_train_ids(
+    samples_by_dataset: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[str]]:
+    """Select the 50 train ids per dataset, sharing the UPR pool."""
+    shared: dict[str, list[str]] = {}
+    for group in sorted(set(SHARED_TRAIN_GROUPS.values())):
+        members = [name for name, group_name in SHARED_TRAIN_GROUPS.items() if group_name == group]
+        eligible_sets = [
+            {sample["doc_id"] for sample in samples_by_dataset[dataset_id]}
+            for dataset_id in members
+        ]
+        eligible = set.intersection(*eligible_sets)
+        # Use the richer recommendation gold for the strata of both UPR tasks.
+        base_dataset = "upr_recommendations" if "upr_recommendations" in members else members[0]
+        candidates = [
+            sample
+            for sample in samples_by_dataset[base_dataset]
+            if sample["doc_id"] in eligible
+        ]
+        shared[group] = select_stratified(
+            candidates,
+            dataset_key=f"{group}:{base_dataset}",
+            stratum_key=lambda sample, base_dataset=base_dataset: dataset_stratum(
+                base_dataset, sample["gold"]
+            ),
+        )
+
+    train_ids: dict[str, list[str]] = {}
+    for dataset_id, samples in samples_by_dataset.items():
+        group = SHARED_TRAIN_GROUPS.get(dataset_id)
+        if group is not None:
+            train_ids[dataset_id] = list(shared[group])
+            continue
+        train_ids[dataset_id] = select_stratified(
+            samples,
+            dataset_key=dataset_id,
+            stratum_key=lambda sample, dataset_id=dataset_id: dataset_stratum(
+                dataset_id, sample["gold"]
+            ),
+        )
+    return train_ids
+
+
+def assign_splits(
+    samples_by_dataset: dict[str, list[dict[str, Any]]],
+    train_ids: dict[str, list[str]],
+    db_by_dataset: dict[str, str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
+    """Assign train/test and drop cross-dataset train documents from test.
+
+    A document is identified by (db, sharedId). Any document selected as train
+    in one dataset is excluded from test in every other dataset of the same
+    database, so no test document was seen while writing examples or repairing
+    a script for another task.
+    """
+    global_train: dict[str, set[str]] = {}
+    for dataset_id, ids in train_ids.items():
+        global_train.setdefault(db_by_dataset[dataset_id], set()).update(ids)
+
+    assigned: dict[str, list[dict[str, Any]]] = {}
+    excluded_counts: dict[str, int] = {}
+    for dataset_id, samples in samples_by_dataset.items():
+        train = set(train_ids[dataset_id])
+        train_elsewhere = global_train[db_by_dataset[dataset_id]]
+        rows: list[dict[str, Any]] = []
+        excluded = 0
+        for sample in samples:
+            doc_id = str(sample["doc_id"])
+            if doc_id in train:
+                split = "train"
+            elif doc_id in train_elsewhere:
+                excluded += 1
+                continue
+            else:
+                split = "test"
+            rows.append({**sample, "split": split})
+        rows.sort(key=lambda row: (row["split"], row["doc_id"]))
+        assigned[dataset_id] = rows
+        excluded_counts[dataset_id] = excluded
+    return assigned, excluded_counts
+
+
 def _write_dataset(
-    spec: DatasetSpec, samples: list[dict[str, Any]], created_at: str
+    spec: DatasetSpec,
+    samples: list[dict[str, Any]],
+    train_ids: list[str],
+    excluded: int,
+    created_at: str,
 ) -> dict[str, Any]:
     splits = Counter(sample["split"] for sample in samples)
     manifest = {
@@ -458,11 +700,23 @@ def _write_dataset(
         "target_schema": spec.target_schema,
         "known_issues": list(spec.known_issues),
         "primary_metric": spec.primary_metric,
-        "split_policy": {"seed": SEED, "fractions": SPLIT_POLICIES[spec.db]},
+        "split_policy_version": SPLIT_POLICY_VERSION,
+        "split_policy": {
+            "version": SPLIT_POLICY_VERSION,
+            "seed": SEED,
+            "train_size": TRAIN_SIZE,
+            "test": "all remaining eligible documents, minus documents that are train in another dataset",
+            "rule": SPLIT_RULE,
+            "strata": stratum_description(spec.dataset_id),
+        },
         "counts": {
             "total": len(samples),
-            **{split: splits.get(split, 0) for split in ("train", "dev", "test")},
+            "train": splits.get("train", 0),
+            "test": splits.get("test", 0),
+            "train_examples": 2,
+            "excluded_train_overlap": excluded,
         },
+        "train_doc_ids": sorted(train_ids),
         "label_distribution": _label_distribution(spec, samples),
         "created_at": created_at,
     }
@@ -485,6 +739,7 @@ def build_datasets() -> dict[str, int]:
     db_cache = {db_name: get_db(db_name) for db_name in DB_TEMPLATES}
     summary: dict[str, int] = {}
 
+    samples_by_dataset: dict[str, list[dict[str, Any]]] = {}
     for spec in DATASETS:
         started = time.time()
         mongo_db = db_cache[spec.db]
@@ -493,14 +748,26 @@ def build_datasets() -> dict[str, int]:
             gold = spec.gold(row, mongo_db)
             if gold is None:
                 continue
-            samples.append(
-                {
-                    "doc_id": row["doc_id"],
-                    "split": split_for(spec.db, row["doc_id"]),
-                    "gold": gold,
-                }
-            )
-        manifest = _write_dataset(spec, samples, created_at)
+            samples.append({"doc_id": row["doc_id"], "gold": gold})
+        samples_by_dataset[spec.dataset_id] = samples
+        print(f"  eligible {spec.dataset_id:<28} {len(samples):>6,} ({time.time() - started:.1f}s)")
+
+    train_ids = select_train_ids(samples_by_dataset)
+    assigned, excluded_counts = assign_splits(
+        samples_by_dataset,
+        train_ids,
+        {spec.dataset_id: spec.db for spec in DATASETS},
+    )
+
+    for spec in DATASETS:
+        samples = assigned[spec.dataset_id]
+        manifest = _write_dataset(
+            spec,
+            samples,
+            train_ids[spec.dataset_id],
+            excluded_counts[spec.dataset_id],
+            created_at,
+        )
         catalog.insert_dataset(
             conn,
             {
@@ -520,8 +787,8 @@ def build_datasets() -> dict[str, int]:
         counts = manifest["counts"]
         print(
             f"  {spec.dataset_id:<28} {len(samples):>6,} samples "
-            f"(train {counts['train']:,} / dev {counts['dev']:,} / test {counts['test']:,}) "
-            f"{time.time() - started:.1f}s",
+            f"(train {counts['train']:,} / test {counts['test']:,} / "
+            f"excluded overlap {counts['excluded_train_overlap']:,})",
             flush=True,
         )
     return summary
