@@ -239,8 +239,8 @@ sub-numbers (`24.112.1`); evaluation scores both (paragraph-level and exact-numb
 4. **Repair:** collect failures; select up to 3 per round (crash/invalid output first, then
    one per label or error type, excluding the 2 prompt examples where possible); send a
    short excerpt of the transformed input, gold, actual output and traceback back to the
-   LLM. Max 4 rounds. Stop after 2 rounds without improvement. Keep the best script by the
-   score on the 48 non-example train documents.
+   LLM. Max 4 rounds. Stop after 2 consecutive rounds without improving the 48-document
+   non-example score. Keep the best script by that score.
 5. **Freeze:** the best script is stored verbatim with its prompt, `InputSpec`, every round,
    and usage.
 6. **Evaluate:** run the frozen script once on the test split; never regenerate after seeing
@@ -573,48 +573,56 @@ exact number 0.938; state 0.991.
 ### v2 LLM scripts (`deepseek-v4.1-flash:cloud`, `think: false`, 2 examples)
 
 All runs use the same split, the shared `InputSpec`, up to 4 repair rounds, and a best-script
-choice on the 48 non-example train documents.
+choice on the 48 non-example train documents. Repair feedback and prompt examples now center
+their excerpt on the relevant transformed-input content (see the focus note below).
 
 | Dataset / input | Train (50) | Train (48 non-example) | Test | Gap (50→test) | Repairs | Best round | Tokens |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `plan_year` / text | 0.660 | 0.646 | 0.769 | -0.109 | 2 | 0 | 17,309 |
-| `plan_year` / segments + position/type | **0.820** | **0.812** | **0.781** | +0.039 | 3 | 1 | 44,656 |
-| `plan_document_code` / text | 0.380 | 0.396 | 0.915 | -0.535 | 3 | 1 | 21,538 |
-| `upr_state` / text | 1.000 | 1.000 | 0.991 | +0.009 | 0 | 0 | 4,078 |
-| `upr_recommendations` / text | 0.320 | 0.319 | 0.436 | -0.116 | 2 | 0 | 35,808 |
-| `upr_recommendations` / segments + position/type | 0.318 | 0.317 | 0.434 | -0.116 | 4 | 2 | 88,403 |
+| `plan_year` / text | 0.720 | 0.708 | 0.826 | -0.106 | 3 | 1 | 22,302 |
+| `plan_year` / segments + position/type | **0.900** | **0.896** | **0.927** | -0.027 | 4 | 3 | 48,490 |
+| `plan_document_code` / text | 0.760 | 0.750 | **0.972** | -0.212 | 4 | 4 | 29,139 |
+| `upr_state` / text | 1.000 | 1.000 | 0.991 | +0.009 | 0 | 0 | 3,736 |
+| `upr_recommendations` / text | 0.916 | 0.918 | 0.880 | +0.037 | 3 | 1 | 63,441 |
+| `upr_recommendations` / segments + position/type | **0.961** | **0.962** | **0.945** | +0.016 | 3 | 1 | 71,545 |
 
 `upr_recommendations` test details:
-- text: P 0.908 / R 0.287 / F1 0.436; text F1 0.998; country 0.952; exact number 0.932;
-  state 0.904.
-- segments + position/type: P 0.909 / R 0.285 / F1 0.434; text F1 0.996; country 0.961;
-  exact number 0.939; state 0.982 (same recall bottleneck).
+- text: P 0.968 / R 0.806 / F1 0.880; text F1 0.998; country 0.955; exact number 0.982;
+  state 0.895.
+- segments + position/type: P 0.952 / R 0.938 / F1 0.945; text F1 0.993; country 0.927;
+  exact number 0.997; state 0.000.
 
 ### What the v2 numbers show
 
-- **UPR state is solved by the model and the baseline**: train 1.000, test 0.991 (one wrong
+- **The excerpt fix mattered a lot.** An earlier v2 pass centered prompt/repair excerpts on
+  an early occurrence of "Recommendations" (or fell back to the document head) because UPR
+  text often has doubled spaces. After matching whitespace-flexibly and centering on the
+  actual recommendation section, the same methods improved dramatically without changing the
+  split or the model: plan year text 0.660→0.720 train / 0.769→0.826 test, document code
+  0.380→0.760 train / 0.915→0.972 test, UPR recommendations text 0.320→0.916 train /
+  0.436→0.880 test, UPR recommendations segments 0.318→0.961 train / 0.434→0.945 test.
+  Context location, not just representation, is a first-order factor.
+- **Plan year benefits from segments/position**: 0.900 train / 0.927 test vs 0.720 / 0.826
+  for text. It nearly matches the regex baseline (0.932 test).
+- **Plan document code is now a strong result**: the LLM script reaches 0.972 test and 0.760
+  train, above the regex baseline on both (0.949 / 0.720). The negative train→test gap is
+  expected because the train set is deliberately stratified by code family and contains
+  rare/hard codes; it is not an overfitting signal.
+- **UPR recommendation extraction is now close to or above the baseline**:
+  - text: F1 0.880 vs baseline 0.883 (same recall regime, better precision).
+  - segments + position/type: F1 0.945 and recall 0.938 vs baseline 0.883 / 0.804. Layout
+    helps the recommendation paragraphs, but the same script returns no state under review
+    on any test document (state accuracy 0.000 vs 0.895 for text). The segment script builds
+    text from segments but its state regex does not handle the page-1 header; this is a
+    concrete, reproducible failure mode and a clear next fix.
+- **UPR state is solved by the model and the baseline**: 1.000 train, 0.991 test (one wrong
   document). Segmentation layout adds nothing here.
-- **Plan year benefits from segments/position**: 0.820 train / 0.781 test vs 0.660 / 0.769
-  for text. It is still far below the 0.932 baseline. The text script's own rewrite attempts
-  made it worse (round 1 train 0.480), which is why best-script selection matters.
-- **Plan document code has a negative train→test gap** because the train set is deliberately
-  stratified by code family and contains rare/hard codes (train 0.380 vs test 0.915). The
-  baseline shows the same direction (0.720 vs 0.949). This is a property of the v2 train
-  design, not evidence that the LLM generalises unusually well; do not read the gap as
-  overfitting or as a test-set win.
-- **UPR recommendation recall is still the main gap**: precision is high (~0.91), but the
-  scripts find only ~29% of gold recommendations on test (and ~19% on the stratified train).
-  The repair loop did not fix this; the generated splitting logic misses recommendation
-  paragraphs/tables. The regex baseline reaches F1 0.883 against 0.436 for the LLM script.
-  This is the clearest next investigation.
-- **Repair is not yet reliable**: 2 of 6 methods (both text inputs) never improved on the
-  initial script; two improved meaningfully (plan year segments, document code), one improved
-  only marginally (UPR recommendations segments), and `upr_state` stopped immediately at a
-  perfect train score. The failure feedback may be too long or the model may be rewriting
-  rather than generalising. Selected rounds and feedback are stored, so this is diagnosable.
+- **Repair is now useful but still uneven**: plan year segments improved from 0.700 to 0.900
+  over four rounds; document code from 0.560 to 0.760; UPR recommendations text from 0.816 to
+  0.916; UPR recommendations segments from 0.887 to 0.961. Two repair rounds in the UPR text
+  run produced invalid Python (syntax errors); best-script selection kept the valid round.
 - **Train is intentionally hard**: stratified rare classes and UPR sub-number/count strata
   make the 50-document train score a diagnostic, not a clean estimate of test performance.
-  Always report both the 50-document and 48 non-example scores and the test score.
+  Always report the 50-document, 48 non-example, and test scores.
 
 ### Model note / cloud fix
 
@@ -630,10 +638,11 @@ to `off`.
 
 ### Known issues / next
 
-1. Improve the repair loop: inspect the stored rounds, compare failure-selection strategies,
-   and shorten/restructure the feedback (the current loop often re-emits the same rule).
-2. Fix UPR recommendation recall: the LLM scripts miss table/numbered paragraphs; compare
-   with the regex baseline's paragraph splitting and test segment input variants.
+1. Fix the UPR recommendation segment script's state extraction: it returns no state on all
+   test documents although recommendations are excellent. Add an explicit state rule for
+   segment input (first-page header lines, `Report of the Working Group ... Review ...`).
+2. Harden repair: two UPR text repair rounds produced invalid Python. Validate the response
+   and retry the same round once before counting it as a failed repair.
 3. Run multiple generation attempts per method to separate prompt/representation effects
    from code-generation variance.
 4. Add a plain-text/markdown run summary alongside the Streamlit viewer.

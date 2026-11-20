@@ -53,10 +53,11 @@ the policy version (`v2-50train`) is stored in dataset manifests, methods, and r
 The LLM pipeline starts from 2 train examples, runs the script over all 50 train documents,
 and scores it with the dataset's primary metric. It feeds back up to 3 representative
 failures per round (crash/invalid output first, then stratified by label/error type, prompt
-examples only when there are not enough other failures), for at most 4 repair rounds. The
-best script is chosen on the 48 non-example train documents, then frozen and run once on
-test. Train (all 50 and 48 non-example), test, gap, repair rounds, failure counts, and token
-usage are stored in the run artifacts.
+examples only when there are not enough other failures), for at most 4 repair rounds. It
+stops after 2 consecutive rounds without improving the 48-document non-example score. The
+best script is chosen on those 48 documents, then frozen and run once on test. Train (all 50
+and 48 non-example), test, gap, repair rounds, failure counts, and token usage are stored in
+the run artifacts.
 
 All script inputs — prompt examples, repair feedback, train/test execution, and the viewer
 preview — go through the same `InputSpec` / `prepare_input` transformation. The spec supports

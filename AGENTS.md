@@ -137,8 +137,9 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   document while the script runs on a truncated input. Gold stays based on the full document.
 - **Repair loop:** 2 prompt examples; run over all 50 train documents; up to 3 representative
   failures per round (crash/invalid output first, then one per label/error type, prompt
-  examples only if needed); at most 4 repair rounds; stop after 2 rounds without improvement;
-  keep the best script on the 48 non-example train documents, then run it once on test.
+  examples only if needed); at most 4 repair rounds; stop after 2 consecutive rounds without
+  improving the 48-document non-example score; keep the best script on those 48 documents,
+  then run it once on test.
 - Do not tune prompts/examples on the test split. Examples come from train only.
 - Use temperature 0 for reproducibility unless an experiment explicitly varies it; record
   the exact model id and token usage.
@@ -173,9 +174,10 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 The v2 benchmark is built (v2-50train datasets, viewer, train/test baselines, repair loop,
 per-round artifacts). Results and known issues are in `PLAN.md` §14. Next work:
 
-1. Improve the repair feedback (the first v2 runs often do not improve after the first
-   script) and UPR prompts/representations.
-2. Compare text vs segments/positions on the same dataset under the new loop.
+1. Fix the UPR recommendation segment script's state extraction (it returns no state on test
+   documents) and harden repair against invalid Python responses.
+2. Compare text vs segments/positions on the same dataset under the new loop and run
+   multiple generation attempts per method.
 3. Add a plain-text/markdown run summary alongside the Streamlit viewer.
 4. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
    conclusions.
