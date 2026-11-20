@@ -15,6 +15,7 @@ truncated input window the method simply fails; the gold is not moved.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
@@ -162,6 +163,15 @@ def _focus_index(text: str, focuses: Iterable[str]) -> int | None:
         index = lowered.find(str(focus).lower())
         if index >= 0:
             return index
+        # PDF extraction often inserts extra spaces/newlines between words
+        # ("recommendations  will  be  examined"). Match those flexibly.
+        words = str(focus).split()
+        if len(words) < 2:
+            continue
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
+        match = pattern.search(text)
+        if match is not None:
+            return match.start()
     return None
 
 

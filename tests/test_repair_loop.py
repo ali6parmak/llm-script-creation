@@ -250,3 +250,15 @@ def test_generate_loop_repairs_on_train_then_freezes_for_test(monkeypatch, tmp_p
     assert metrics["rounds"][0]["selected_failures"]
     assert len(written["records"]) == 6
     assert written["round_count"] == 2
+
+
+def test_failure_focuses_include_recommendation_base_number() -> None:
+    focuses = generate._failure_focuses(
+        "upr_recommendations",
+        {
+            "state_under_review": "Norway",
+            "recommendations": [{"number": "140.1.1", "text": "x", "countries": ["Croatia"]}],
+        },
+    )
+    assert "140.1.1" in focuses
+    assert "140.1" in focuses

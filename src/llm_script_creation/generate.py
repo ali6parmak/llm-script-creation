@@ -314,9 +314,14 @@ def _failure_focuses(dataset_id: str, gold: dict[str, Any]) -> tuple[str, ...]:
             focuses.insert(0, str(state))
     elif dataset_id == "upr_recommendations":
         for recommendation in gold.get("recommendations", [])[:3]:
-            number = recommendation.get("number")
-            if number:
-                focuses.append(str(number))
+            number = str(recommendation.get("number") or "")
+            if not number:
+                continue
+            focuses.append(number)
+            # Gold may use sub-numbers (140.1.1); the document usually shows 140.1.
+            parts = number.split(".")
+            if len(parts) >= 3:
+                focuses.append(".".join(parts[:2]))
     else:
         for value in gold.values():
             if isinstance(value, (str, int)):

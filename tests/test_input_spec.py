@@ -185,3 +185,19 @@ def test_segment_prompt_example_uses_transformed_segments_only() -> None:
     assert "OUTSIDE-SEGMENT" not in prompt
     assert "ALSO-OUTSIDE" not in prompt
     assert "first 1 segments" in prompt
+
+
+def test_focus_matching_tolerates_extra_whitespace() -> None:
+    payload = {
+        "text": "A" * 2000
+        + "  The  following  recommendations  will  be  examined  by  Norway.  "
+        + "B" * 2000
+    }
+    excerpt, truncated = payload_excerpt(
+        payload,
+        InputSpec(),
+        char_limit=400,
+        focuses=("recommendations will be examined",),
+    )
+    assert truncated is True
+    assert "following  recommendations" in excerpt

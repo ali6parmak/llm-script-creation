@@ -163,7 +163,8 @@ def prompt_focuses(dataset_id: str) -> tuple[str, ...]:
     return {
         "upr_recommendations": (
             "recommendations will be examined",
-            "Recommendations",
+            "following recommendations",
+            "Conclusions and/or recommendations",
         ),
         "upr_state": ("Report of the Working Group",),
         "plan_year": ("Distr.: General", "adopted"),
