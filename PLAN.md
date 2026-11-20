@@ -231,14 +231,20 @@ sub-numbers (`24.112.1`); evaluation scores both (paragraph-level and exact-numb
 
 ### 4.2 Lifecycle
 
-1. **Generate:** prompt → LLM → parse one Python code block.
+1. **Generate:** prompt with 2 train examples and the shared `InputSpec` → LLM → parse one
+   Python code block.
 2. **Static check:** compile the script, enforce the function contract, lint imports.
-3. **Smoke test:** run on 3–5 dev documents; validate output schema and record errors.
-4. **Repair:** if the script crashes, times out, or returns invalid shapes, send the error
-   and a failing example back to the LLM (max 3 repairs). Keep every attempt and the errors.
-5. **Freeze:** the final script is stored verbatim with its prompt and model configuration.
-6. **Evaluate:** run the frozen script on the test split; never regenerate after seeing test
-   results.
+3. **Train sweep:** run the script over all 50 train documents using the same `InputSpec` as
+   the prompt examples; score with the dataset's primary metric.
+4. **Repair:** collect failures; select up to 3 per round (crash/invalid output first, then
+   one per label or error type, excluding the 2 prompt examples where possible); send a
+   short excerpt of the transformed input, gold, actual output and traceback back to the
+   LLM. Max 4 rounds. Stop after 2 rounds without improvement. Keep the best script by the
+   score on the 48 non-example train documents.
+5. **Freeze:** the best script is stored verbatim with its prompt, `InputSpec`, every round,
+   and usage.
+6. **Evaluate:** run the frozen script once on the test split; never regenerate after seeing
+   test results. Report train (all 50 and 48 non-example), test, and the gap.
 
 The key scientific unit is the **frozen script**, not a per-document LLM call. The script
 can be inspected, versioned, and run cheaply over thousands of documents.
@@ -281,17 +287,27 @@ text, etc.
 The core difficulty is paragraph splitting: one segment/paragraph may contain several
 recommendations, and gold uses sub-numbers when they share a paragraph number.
 
-### 5.3 Splits
+### 5.3 Splits (`v2-50train`)
 
-- **Plan:** 70/15/15 split by `Document.sharedId`, seed 42. For per-field tasks, split the
-  subset of documents with non-empty gold; stratify by field label when feasible.
-- **UPR:** 60/20/20 split by `Document.sharedId`, seed 42 (~99/33/33 docs). Group by
-  document so recommendations from one document never cross splits.
-- Keep a **dev** split for prompt/example iteration and a **test** split that is touched
-  only by frozen scripts. The split manifest is a committed artifact (IDs + seed).
-- Few-shot examples are always selected from train only.
-- For UPR, stratify by cycle where possible (only 2 Cycle-2 documents exist; document the
-  imbalance rather than pretending the split is balanced).
+- **Every dataset:** 50 train documents and the rest as test. There is no dev split.
+- Split by `Document.sharedId`, never by recommendation/segment. Seed 42.
+- Train is deterministic and stratified, not pure random:
+  - Plan select fields and `body`: gold label.
+  - Plan `year`: decade; `field_month`: month.
+  - Plan `document_code`: code family (`A/HRC`, `A/RES`, `S/RES`, `E/CN.4`, ILO `C...`).
+  - Plan `field_document_number`: numeric / mixed / text.
+  - UPR: recommendation-count bucket × sub-numbered recommendations.
+  - Rule: strata sorted rarest-first; one document per stratum; remaining slots proportional
+    to stratum size (largest remainder); within-stratum order
+    `sha256(seed:dataset:sharedId)`. Rare/hard cases are therefore represented by design.
+- **Cross-dataset isolation:** any document selected as train in one dataset is excluded from
+  test in every other dataset of the same database. This is why test counts are smaller than
+  the eligible counts (e.g. `plan_year` 9,965 test of 10,391 eligible).
+- `upr_state` and `upr_recommendations` share the same 50-document train pool.
+- Few-shot examples are always selected from train only (2 examples; they are part of the 50
+  and are excluded when reporting the 48 non-example train score).
+- The split policy version and train ids are stored in every dataset manifest, method, and
+  run.
 
 ## 6. Representations and experimental factors
 
@@ -342,7 +358,10 @@ Task descriptions must encode the data quirks we found, e.g.:
 - Plan: only output labels from the supplied candidate list when a list is supplied;
   otherwise output the text as it appears.
 
-We will compare at least three prompt variants on the dev split before freezing test runs.
+Prompt variants are compared on train (all 50 and the 48 non-example documents); the test
+split is touched only once by the best frozen script. Prompt examples, repair feedback,
+train/test execution, and the viewer preview all use the same `InputSpec` /
+`prepare_input(...)` transformation.
 
 ## 8. Script execution and safety
 
@@ -414,16 +433,20 @@ spending LLM calls.
 
 ## 11. Reproducibility and logging
 
-Each run gets `results/<run-id>/` containing:
+Each method gets `artifacts/methods/<method_id>/` and each run
+`artifacts/runs/<run_id>/`:
 
-- `config.json`: model, prompt hash, representation, split, seed, temperature, max tokens.
-- `prompt.txt`: exact prompt sent.
-- `attempts/attempt-<n>.py`: every generated script, including failed ones.
-- `attempts/attempt-<n>.json`: raw response, validation errors, repair feedback.
-- `final_script.py`: frozen script.
-- `predictions.jsonl`: one row per document with prediction, gold, latency, errors.
-- `metrics.json`: all metrics + bootstrap CIs.
-- `logs.txt`: human-readable run log.
+- `method.json`: model, prompt hash, `input_spec`, examples, repair rounds, best round,
+  token usage, final train/test scores.
+- `prompt.txt`: exact initial prompt sent.
+- `attempts/attempt-<n>.json`: round, raw response, generated script, validation errors,
+  repair feedback, per-round scores.
+- `script.py`: frozen best script.
+- `metrics.json`: primary train (all 50 and 48 non-example), test, gap, repair rounds,
+  failure counts, token usage, `InputSpec`, and split-policy version.
+- `predictions.jsonl`: one row per train and test document with prediction, gold, error.
+- `rounds/round-<n>/`: script, response, feedback used, full messages, per-round metrics,
+  and predictions for every repair round.
 
 Rules:
 
@@ -446,26 +469,26 @@ Rules:
    free text for `body`, and score against observed gold.
 5. **Gold quality.** Should someone review a sample of ground truth before the benchmark?
    Recommended for UPR recommendation numbers and Plan `document_code`.
-6. **Budget.** How many LLM calls / tokens are acceptable for M2–M4? Start with dev subsets
-   (≤ 30 docs per smoke run) and scale only after the harness is trusted.
-7. **Language scope.** Start with English; add French/Spanish later only if the benchmark
+6. **Budget.** How many LLM calls / tokens are acceptable for M2–M4? The v2 loop uses 2
+   examples and at most 4 repair rounds per method; use `--limit` for smoke runs and scale
+   only after the harness is trusted.
+7. **Repair quality.** The first v2 runs often stop improving after the first script. Is the
+   bottleneck the failure selection, the feedback format, or the model's ability to
+   generalise from the transformed excerpts?
+8. **Language scope.** Start with English; add French/Spanish later only if the benchmark
    results justify it.
 
-## 13. Immediate next steps (M1)
+## 13. Immediate next steps (v2)
 
-1. Add `datasets.py` with:
-   - `PlanTask` / `UprTask` definitions and gold extraction;
-   - deterministic split manifests keyed by `sharedId`;
-   - JSONL dataset builder (`documents`, `gold`, `split`).
-2. Add `evaluation.py` with Plan field metrics and UPR recommendation alignment.
-3. Add `normalization.py` with:
-   - state/country alias maps (Uwazi label ↔ document form ↔ ISO code);
-   - text, number, and punctuation normalization used by evaluation.
-4. Add tests for dataset invariants and evaluation edge cases.
-5. Add `scripts/build_dataset.py` / `uv run build-dataset`.
-6. Add a tiny rule-based extractor and run it through the eval harness (no LLM) to validate
-   the plumbing and get a lower bound.
-7. Then build the LLM client + sandbox (M2).
+1. Investigate the repair loop: inspect failed rounds and compare failure-selection
+   strategies (crash-first, label-stratified, lowest-F1 first).
+2. Compare text vs segments/positions on the same dataset under the new loop; the train set
+   is stratified, so train/test gaps can be negative (train is intentionally harder).
+3. Run multiple generation attempts per method to separate prompt/representation effects
+   from code-generation variance.
+4. Add a plain-text/markdown run summary alongside the Streamlit viewer.
+5. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
+   conclusions.
 
 ## Appendix A — quick data access
 
@@ -487,106 +510,131 @@ uv run inspect-data --db plan
 ```
 
 
-## 14. Implementation status and first results (2026-11-20)
+## 14. Implementation status and v2 results (2026-11-20)
 
 ### What is built
 
 | Piece | Where | Status |
 |---|---|---|
-| Document catalog + datasets + splits + manifests | `src/llm_script_creation/catalog.py`, `datasets.py`, `artifacts/` | done |
-| Streamlit viewer (datasets, samples, methods, runs, compare) | `app/app.py` | done |
-| Rule-based baselines | `baselines.py`, `experiments.py` | done |
+| Document catalog + v2 datasets + stratified splits + manifests | `catalog.py`, `datasets.py`, `artifacts/` | done |
+| Streamlit viewer (datasets, samples, methods, compare) | `app/app.py` | done |
+| Rule-based baselines on train + test | `baselines.py`, `experiments.py` | done |
 | Evaluation (Plan fields + UPR recommendations) | `evaluation.py`, `normalization.py` | done |
-| LLM prompt builder + client + sandbox + repair loop | `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` | done |
-| Method/run artifacts | `runs.py`, `artifacts/methods`, `artifacts/runs` | done |
+| Shared `InputSpec` for examples/repair/execution/UI | `input_spec.py`, `prompts.py`, `generate.py`, `app/app.py` | done |
+| LLM client + sandbox + full-train repair loop | `llm.py`, `sandbox.py`, `generate.py` | done |
+| Per-round and final artifacts | `runs.py`, `artifacts/methods`, `artifacts/runs` | done |
 | Viewer theming | `app/theme.py`, `.streamlit/config.toml` | done |
 
 Commands:
 
 ```bash
-uv run build-datasets
-uv run run-baselines --split dev
-uv run generate-script --dataset plan_year --split dev --model qwen2.5-coder:14b
+export UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache}
+uv run build-datasets --skip-documents
+uv run run-baselines
+uv run generate-script --dataset plan_year --examples 2 --max-repair-rounds 4
 uv run streamlit run app/app.py
 ```
 
-The catalog is ~800 MB and lives in `artifacts/catalog.db` (gitignored). Dataset manifests
+The catalog is ~800 MB and lives in `artifacts/catalog.db` (gitignored). v2 dataset manifests
 and sample ids are in `artifacts/datasets/`. Methods and runs are self-describing JSON
 directories under `artifacts/methods/` and `artifacts/runs/`; the viewer reads them directly.
+Old dev-split artifacts are archived under `artifacts/archive/pre-v2/` and are not mixed with
+v2 runs.
 
-Dataset sizes after intersecting with segmented English documents:
+Dataset sizes after v2 splitting (`train` is always 50; `test` excludes cross-dataset train
+documents):
 
-| Dataset | Samples |
-|---|---:|
-| `plan_document_type` | 3,112 |
-| `plan_legal_status` | 3,112 |
-| `plan_means_of_adoption` | 3,111 |
-| `plan_year` | 10,391 |
-| `plan_document_code` | 8,840 |
-| `plan_body` | 10,512 |
-| `plan_field_month` | 1,716 |
-| `plan_document_number` | 1,388 |
-| `plan_all_fields` | 2,792 |
-| `upr_state` | 165 |
-| `upr_recommendations` | 164 (38,774 recommendations) |
+| Dataset | Total | Test |
+|---|---:|---:|
+| `plan_document_type` | 2,775 | 2,725 |
+| `plan_legal_status` | 2,775 | 2,725 |
+| `plan_means_of_adoption` | 2,774 | 2,724 |
+| `plan_year` | 10,015 | 9,965 |
+| `plan_document_code` | 8,508 | 8,458 |
+| `plan_body` | 10,137 | 10,087 |
+| `plan_field_month` | 1,565 | 1,515 |
+| `plan_field_document_number` | 1,241 | 1,191 |
+| `plan_all_fields` | 2,493 | 2,443 |
+| `upr_state` | 165 | 115 |
+| `upr_recommendations` | 164 | 114 |
 
-### First dev-split results
+### v2 baselines
 
-Baselines (deterministic regex/heuristics):
+| Dataset | Metric | Train (50) | Test | Gap |
+|---|---|---:|---:|---:|
+| `plan_year` | accuracy | 0.920 | 0.932 | -0.012 |
+| `plan_document_code` | accuracy | 0.720 | 0.949 | -0.229 |
+| `upr_state` | accuracy | 1.000 | 0.991 | +0.009 |
+| `upr_recommendations` | F1 | 0.920 | 0.883 | +0.037 |
 
-| Dataset | Metric |
-|---|---:|
-| `plan_year` | accuracy 0.926 |
-| `plan_document_code` | accuracy 0.944 |
-| `upr_state` | accuracy 1.000 |
-| `upr_recommendations` | P 0.959 / R 0.703 / F1 0.811 |
+`upr_recommendations` test: P 0.979 / R 0.804 / F1 0.883; text F1 0.999; country 0.945;
+exact number 0.938; state 0.991.
 
-First LLM-generated scripts (dev, `deepseek-v4.1-flash:cloud`, native API with
-`think: false`):
+### v2 LLM scripts (`deepseek-v4.1-flash:cloud`, `think: false`, 2 examples)
 
-| Dataset | Result |
-|---|---|
-| `plan_year` / text | accuracy 0.841 (baseline 0.926) |
-| `plan_year` / segments+position | accuracy 0.827 — no gain over text on this task |
-| `plan_document_code` / text | accuracy 0.883, token F1 0.933 (baseline 0.944) |
-| `upr_state` / text | accuracy 0.935 (baseline 1.000) |
-| `upr_recommendations` / text | P 0.877 / R 0.356 / F1 0.506; country 0.966; exact number 0.937; state 1.000 |
-| `upr_recommendations` / segments+position | P 0.878 / R 0.355 / F1 0.506 — same as text |
+All runs use the same split, the shared `InputSpec`, up to 4 repair rounds, and a best-script
+choice on the 48 non-example train documents.
 
-These are **not** tuned final results. They already show useful patterns:
+| Dataset / input | Train (50) | Train (48 non-example) | Test | Gap (50→test) | Repairs | Best round | Tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `plan_year` / text | 0.660 | 0.646 | 0.769 | -0.109 | 2 | 0 | 17,309 |
+| `plan_year` / segments + position/type | **0.820** | **0.812** | **0.781** | +0.039 | 3 | 1 | 44,656 |
+| `plan_document_code` / text | 0.380 | 0.396 | 0.915 | -0.535 | 3 | 1 | 21,538 |
+| `upr_state` / text | 1.000 | 1.000 | 0.991 | +0.009 | 0 | 0 | 4,078 |
+| `upr_recommendations` / text | 0.320 | 0.319 | 0.436 | -0.116 | 2 | 0 | 35,808 |
+| `upr_recommendations` / segments + position/type | 0.318 | 0.317 | 0.434 | -0.116 | 4 | 2 | 88,403 |
 
-- The LLM gets close to the baseline on UPR state (0.935 vs 1.000) but still misses the
-  split title line on two documents.
-- Plan year and document code remain below the baseline. The LLM scripts do not yet beat
-  simple regex heuristics.
-- Segment layout did **not** improve these two tasks. That is a legitimate negative result:
-  for year/document-code and recommendation extraction, reading order/layout was not the
-  bottleneck.
-- Recommendation recall is the main gap (0.356): the scripts find a subset of paragraphs
-  with high precision (0.877) and near-perfect text F1 (0.998).
-- A single prompt can produce very different scripts across runs. The compare page should
-  not be read as a clean ablation until we run multiple attempts/seeds per method.
+`upr_recommendations` test details:
+- text: P 0.908 / R 0.287 / F1 0.436; text F1 0.998; country 0.952; exact number 0.932;
+  state 0.904.
+- segments + position/type: P 0.909 / R 0.285 / F1 0.434; text F1 0.996; country 0.961;
+  exact number 0.939; state 0.982 (same recall bottleneck).
+
+### What the v2 numbers show
+
+- **UPR state is solved by the model and the baseline**: train 1.000, test 0.991 (one wrong
+  document). Segmentation layout adds nothing here.
+- **Plan year benefits from segments/position**: 0.820 train / 0.781 test vs 0.660 / 0.769
+  for text. It is still far below the 0.932 baseline. The text script's own rewrite attempts
+  made it worse (round 1 train 0.480), which is why best-script selection matters.
+- **Plan document code has a negative train→test gap** because the train set is deliberately
+  stratified by code family and contains rare/hard codes (train 0.380 vs test 0.915). The
+  baseline shows the same direction (0.720 vs 0.949). This is a property of the v2 train
+  design, not evidence that the LLM generalises unusually well; do not read the gap as
+  overfitting or as a test-set win.
+- **UPR recommendation recall is still the main gap**: precision is high (~0.91), but the
+  scripts find only ~29% of gold recommendations on test (and ~19% on the stratified train).
+  The repair loop did not fix this; the generated splitting logic misses recommendation
+  paragraphs/tables. The regex baseline reaches F1 0.883 against 0.436 for the LLM script.
+  This is the clearest next investigation.
+- **Repair is not yet reliable**: 2 of 6 methods (both text inputs) never improved on the
+  initial script; two improved meaningfully (plan year segments, document code), one improved
+  only marginally (UPR recommendations segments), and `upr_state` stopped immediately at a
+  perfect train score. The failure feedback may be too long or the model may be rewriting
+  rather than generalising. Selected rounds and feedback are stored, so this is diagnosable.
+- **Train is intentionally hard**: stratified rare classes and UPR sub-number/count strata
+  make the 50-document train score a diagnostic, not a clean estimate of test performance.
+  Always report both the 50-document and 48 non-example scores and the test score.
 
 ### Model note / cloud fix
 
 The native Ollama `/api/chat` endpoint exposes a `think` control. Setting
-`"think": false` makes `deepseek-v4.1-flash:cloud` return final content immediately
-(~3 seconds for the year prompt). The OpenAI-compatible `/v1/chat/completions` endpoint
-ignored `think` and the reasoning models spent the whole completion budget on hidden
-reasoning with empty `content`.
+`"think": false` makes `deepseek-v4.1-flash:cloud` return final content immediately.
+The OpenAI-compatible `/v1/chat/completions` endpoint ignored `think` and the reasoning
+models spent the whole completion budget on hidden reasoning with empty `content`.
 
-`llm.py` now uses the native endpoint and records `message.thinking`, `done_reason`,
-prompt/eval token counts, and every attempt. The configured `MODEL` remains
+`llm.py` uses the native endpoint and records `message.thinking`, `done_reason`, prompt/eval
+token counts, and every attempt. The configured `MODEL` remains
 `deepseek-v4.1-flash:cloud`; `generate-script` exposes `--think off|low|high|max`, defaulting
-to `off`. Local-model experiment artifacts were removed.
+to `off`.
 
 ### Known issues / next
 
-1. UPR recommendation recall is still low; inspect the generated script and paragraph
-   splitting rules before adding more prompt variants.
-2. Run frozen scripts on the test split (not done yet).
+1. Improve the repair loop: inspect the stored rounds, compare failure-selection strategies,
+   and shorten/restructure the feedback (the current loop often re-emits the same rule).
+2. Fix UPR recommendation recall: the LLM scripts miss table/numbered paragraphs; compare
+   with the regex baseline's paragraph splitting and test segment input variants.
 3. Run multiple generation attempts per method to separate prompt/representation effects
    from code-generation variance.
-4. Add a plain-text run summary alongside the Streamlit viewer.
-5. Review the `upr_recommendations` gold noise and sub-number matching before drawing strong
-   conclusions.
+4. Add a plain-text/markdown run summary alongside the Streamlit viewer.
+5. Review `upr_recommendations` gold noise and sub-number matching before strong conclusions.

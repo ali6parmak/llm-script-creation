@@ -24,10 +24,11 @@ Uwazi metadata. Read `PLAN.md` first. Generated data reports live in `reports/`.
   - `text.py` — document representations (`text`, `segments-tsv`, `segments-json`).
   - `inspect_data.py` — report generator / `inspect-data` CLI.
   - `catalog.py` — SQLite document/dataset/sample catalog.
-  - `datasets.py` — dataset specs, gold extraction, stable splits.
+  - `datasets.py` — dataset specs, gold extraction, v2 stratified splits.
   - `normalization.py` — text/number/country normalization and aliases.
   - `evaluation.py` — Plan field metrics and UPR recommendation matching.
   - `baselines.py`, `experiments.py` — deterministic baselines and run artifacts.
+  - `input_spec.py` — shared input transformation for prompts, execution and the viewer.
   - `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` — LLM script pipeline.
 - `app/app.py` — Streamlit viewer for datasets, samples, methods, comparisons.
 - `app/theme.py` — palette registry (Gruvbox Dark, Tokyo Night), CSS and status colors.
@@ -45,8 +46,8 @@ uv sync --group dev
 uv run inspect-data                 # both databases → reports/data_report.md
 uv run inspect-data --db plan
 uv run build-datasets               # catalog + all datasets (rebuild docs unless --skip-documents)
-uv run run-baselines --split dev    # deterministic baselines + run artifacts
-uv run generate-script --dataset plan_year --split dev
+uv run run-baselines                # deterministic baselines on train + test
+uv run generate-script --dataset plan_year   # generate → repair on train → freeze → test
 uv run streamlit run app/app.py
 uv run pytest -q
 uv run ruff check src tests app
@@ -96,7 +97,16 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   even after accent/punctuation normalization. Use a state/country alias map for evaluation
   and for the candidate list.
 - Split by document (`sharedId`), never by recommendation/segment. Keep test untouched
-  until scripts are frozen. Use seed 42 and commit split manifests.
+  until scripts are frozen.
+- **Split policy `v2-50train` (seed 42):** every dataset has 50 train documents and the rest
+  as test. There is no dev split. Train is deterministic and stratified (labels/classes
+  where they exist; decades for years; code families for document codes;
+  recommendation-count buckets + sub-numbered documents for UPR; rare strata first, then
+  proportional fill; within-stratum order `sha256(seed:dataset:sharedId)`).
+- **Cross-dataset isolation:** any document selected as train in one dataset is excluded
+  from test in every other dataset of the same database. `upr_state` and
+  `upr_recommendations` share the same 50-document train pool. The split policy version and
+  train ids are stored in dataset manifests, methods, and runs.
 - Inspect a sample of gold before writing a benchmark task; report known gold errors.
 
 ## Code conventions
@@ -121,7 +131,14 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   allowlist, and wall-clock/memory limits. Never pass `.env` or host credentials.
 - Reject scripts that open files, use network/subprocess, or import outside the allowlist.
 - Log every prompt, raw LLM response, generated script (including failed attempts), repair
-  feedback, and final frozen script under `artifacts/runs/<run_id>/`.
+  feedback, per-round predictions, and final frozen script under `artifacts/runs/<run_id>/`.
+- Every payload must come from `input_spec.prepare_input`: prompt examples, repair feedback,
+  train/test execution, and the viewer preview. Never show an excerpt from the untransformed
+  document while the script runs on a truncated input. Gold stays based on the full document.
+- **Repair loop:** 2 prompt examples; run over all 50 train documents; up to 3 representative
+  failures per round (crash/invalid output first, then one per label/error type, prompt
+  examples only if needed); at most 4 repair rounds; stop after 2 rounds without improvement;
+  keep the best script on the 48 non-example train documents, then run it once on test.
 - Do not tune prompts/examples on the test split. Examples come from train only.
 - Use temperature 0 for reproducibility unless an experiment explicitly varies it; record
   the exact model id and token usage.
@@ -153,14 +170,14 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 
 ## Current status / next tasks
 
-The end-to-end prototype is built (catalog/datasets, viewer, baselines, LLM pipeline).
-First results and known issues are in `PLAN.md` §14. Next work:
+The v2 benchmark is built (v2-50train datasets, viewer, train/test baselines, repair loop,
+per-round artifacts). Results and known issues are in `PLAN.md` §14. Next work:
 
-1. Improve UPR state/recommendation prompts and representations (segment types).
-2. Run frozen scripts on the test split (do not tune there).
-3. Compare text vs segments/positions on the same dataset.
-4. Add a plain-text/markdown run summary alongside the Streamlit viewer.
-5. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
+1. Improve the repair feedback (the first v2 runs often do not improve after the first
+   script) and UPR prompts/representations.
+2. Compare text vs segments/positions on the same dataset under the new loop.
+3. Add a plain-text/markdown run summary alongside the Streamlit viewer.
+4. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
    conclusions.
 
 When you finish a meaningful step, regenerate `reports/data_report.md` if data assumptions

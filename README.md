@@ -21,17 +21,47 @@ uv sync --group dev
 
 uv run inspect-data                 # reports/data_report.{md,json}
 uv run build-datasets               # snapshot documents + build datasets (~1 min)
-uv run run-baselines --split dev    # deterministic baseline runs
+uv run run-baselines                # deterministic baselines on train and test
 uv run streamlit run app/app.py     # viewer: datasets, samples, methods, compare
 uv run pytest -q
-uv run ruff check src tests
+uv run ruff check src tests app
 ```
 
-Generate an LLM script and immediately evaluate it on the dev split:
+Generate an LLM script, repair it on train, then evaluate the frozen script on test:
 
 ```bash
-uv run generate-script --dataset plan_year --split dev --examples 2
+uv run generate-script --dataset plan_year --examples 2 --max-repair-rounds 4
 ```
+
+## Split policy `v2-50train`
+
+There is no `dev` split. Each dataset has:
+
+- **train**: 50 documents, selected deterministically and stratified (labels/classes where
+  they exist, decades for years, code families for document codes, recommendation-count
+  buckets plus sub-numbered recommendations for UPR; rare strata first, then proportional
+  fill; within-stratum order is `sha256(seed:dataset:sharedId)`).
+- **test**: every remaining eligible document, except documents that are train in another
+  dataset. This strict cross-dataset isolation means no test document was seen while
+  writing examples or repairing a script for another task.
+
+`upr_state` and `upr_recommendations` share the same 50-document train pool. Seed is 42 and
+the policy version (`v2-50train`) is stored in dataset manifests, methods, and runs.
+
+## Repair loop
+
+The LLM pipeline starts from 2 train examples, runs the script over all 50 train documents,
+and scores it with the dataset's primary metric. It feeds back up to 3 representative
+failures per round (crash/invalid output first, then stratified by label/error type, prompt
+examples only when there are not enough other failures), for at most 4 repair rounds. The
+best script is chosen on the 48 non-example train documents, then frozen and run once on
+test. Train (all 50 and 48 non-example), test, gap, repair rounds, failure counts, and token
+usage are stored in the run artifacts.
+
+All script inputs — prompt examples, repair feedback, train/test execution, and the viewer
+preview — go through the same `InputSpec` / `prepare_input` transformation. The spec supports
+text or segments, first/last N characters or segments, and position/type flags, and is stored
+in `method.json`.
 
 Cloud models run through Ollama's native `/api/chat` endpoint with `think: false` so
 reasoning models return final content instead of spending the whole budget on hidden
@@ -55,9 +85,11 @@ selector without touching the pages.
 ```
 artifacts/catalog.db              # documents, datasets, samples (SQLite)
 artifacts/states.json             # 195 UPR state/country candidates
-artifacts/datasets/<id>/          # manifest.json + samples.jsonl
-artifacts/methods/<id>/           # method.json, prompt.txt, script.py, attempts/
-artifacts/runs/<run_id>/          # run.json, predictions.jsonl, metrics.json
+artifacts/datasets/<id>/          # manifest.json + samples.jsonl (train/test)
+artifacts/methods/<id>/           # method.json (input_spec, rounds), prompt, script, attempts/
+artifacts/runs/<run_id>/          # run.json, metrics.json, predictions.jsonl, script.py
+artifacts/runs/<run_id>/rounds/   # per-round script, feedback, messages, metrics, predictions
+artifacts/archive/pre-v2/         # old dev-split methods/runs/datasets, not mixed with v2
 ```
 
 The catalog is the document/sample index used by experiments and the viewer. MongoDB remains
@@ -86,15 +118,16 @@ src/llm_script_creation/
   text.py            text / TSV / JSON representations
   inspect_data.py    data report CLI (`inspect-data`)
   catalog.py         SQLite catalog for documents/datasets/samples
-  datasets.py        dataset specs, gold extraction, splits, builder
+  datasets.py        dataset specs, gold extraction, v2 stratified splits, builder
   normalization.py   text/number/country normalization
   evaluation.py      Plan field metrics + UPR recommendation matching
   baselines.py       deterministic regex/heuristic baselines
-  experiments.py     baseline runner + run artifacts
+  experiments.py     baseline runner (train/test) + run artifacts
+  input_spec.py      shared text/segment transformation + prompt/UI excerpts
   prompts.py         LLM prompt builder
-  llm.py             Ollama OpenAI-compatible client
+  llm.py             Ollama native `/api/chat` client (think=false)
   sandbox.py         script validation + subprocess execution
-  generate.py        generate → smoke test → repair → evaluate pipeline
+  generate.py        generate → train repair → freeze best → test pipeline
 app/app.py           Streamlit viewer
 app/theme.py         theme registry (Gruvbox, Tokyo Night) and semantic colors
 tests/               unit tests (no Mongo required)
@@ -104,9 +137,9 @@ data/                restored Mongo dumps (gitignored)
 
 ## Status
 
-The end-to-end prototype is working: catalog/datasets, viewer, rule-based baselines, and the
-LLM-generated-script pipeline. First dev results and model notes are in
-[PLAN.md §14](PLAN.md#14-implementation-status-and-first-results-2026-11-20).
+The v2 benchmark is working end to end: v2-50train datasets, staged train/test baselines,
+and the LLM generate → repair → freeze → test pipeline. Results are in
+[PLAN.md §14](PLAN.md#14-implementation-status-and-v2-results).
 
 Model note: `deepseek-v4.1-flash:cloud` is the default and works with `think: false`.
 The OpenAI-compatible `/v1/chat/completions` endpoint ignored `think` and returned empty
