@@ -1,7 +1,37 @@
 [project]
 name = "llm-script-creation"
 version = "0.1.0"
-description = "Add your description here"
+description = "Benchmark whether LLMs can write extraction scripts for Uwazi documents"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pymongo>=4.20.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+inspect-data = "llm_script_creation.inspect_data:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_script_creation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

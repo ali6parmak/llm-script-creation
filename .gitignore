@@ -224,3 +224,11 @@ __marimo__/
 
 
 data/
+
+# project-local uv cache (home cache is read-only in some sandboxes)
+.uv-cache/
+
+# generated reports, experiment outputs and scratch scripts
+reports/
+results/
+work/
