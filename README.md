@@ -182,7 +182,8 @@ data/                restored Mongo dumps (gitignored)
 ## Status
 
 The v2 benchmark is working end to end: v2-50train datasets, staged train/test baselines,
-and the LLM generate → repair → freeze → test pipeline. Results are in
+the LLM generate → repair → freeze → test pipeline, and a read-only adapter that evaluates
+the real Uwazi admin agent's nested extractor on the same Plan fields. Results are in
 [PLAN.md §14](PLAN.md#14-implementation-status-and-v2-results).
 
 Model note: `deepseek-v4.1-flash:cloud` is the default and works with `think: false`.

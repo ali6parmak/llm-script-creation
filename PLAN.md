@@ -639,6 +639,52 @@ samples stats and a clipped tool-call transcript. The run records our Plan metri
 agent's own `extraction_eval` score, and per-document predictions. Nothing is written to
 MongoDB.
 
+**Results (v2-50train, seed 42, 2026-11-20):**
+
+| Dataset | Train (50) | Test | Gap | Coverage (test) | Admin eval | Test statuses | Author requests | Tokens |
+|---|---:|---:|---:|---:|---:|---|---:|---:|
+| `plan_year` | 0.960 | **0.934** (9,304 / 9,965) | +0.026 | 99.7% | 93.4% (10,015 judged) | 9,304 hit · 628 wrong · 33 missing | 14 | 1,089,919 |
+| `plan_document_code` | 0.800 | **0.973** (8,232 / 8,458) | −0.173 | 99.4% | 96.3% (8,508 judged) | 8,232 hit · 178 wrong · 48 missing | 13 | 1,186,141 |
+| `plan_document_type` | 0.940 | **0.894** (2,437 / 2,725) | +0.046 | 91.4% | 89.5% (2,775 judged) | 2,437 hit · 53 wrong · 235 missing | 18 | 2,954,941 |
+
+The 5/5 spike scored 5/5 train and 5/5 test (admin eval 100%). On the full run the admin
+agent sampled 12 train documents with `peek_segmentation_by_entity` and used
+`benchmark_extractor` three times. The returned function uses ordered fallbacks: a
+compilation-entry lookup keyed on the entity's own `field_document_number` metadata (needed
+because one PDF can hold many conclusions), then the official "Distr.: General <date>"
+header year, then a heading-style `(YYYY)`, then the first full date in the text. That
+metadata-aware compilation rule is a concrete example of the production-context condition
+doing work: with title/metadata hidden it could not disambiguate a shared PDF.
+
+The dominant error class is the year disagreement between a document's adoption date and its
+distribution/header date (e.g. shared_id `5zhgytix6is`: gold 2015, header 2016). The
+extractor's unmatched notes document this as a curation inconsistency. 33 test documents
+return `None` (no full date found) and are counted as missing, not wrong.
+
+On `plan_document_code` the extractor reads the repeated running header/cover symbol (with a
+fallback for Commission on Human Rights resolution pages) and reaches 0.973 test over 8,458
+documents; the negative train→test gap is the same stratified-train effect seen for the LLM
+scripts (rare code families are concentrated in the 50 train documents).
+
+On `plan_document_type` the extractor keys off UN header/signature phrases (resolution
+headers, ExCom conclusion titles, "agreed as follows" plus a regional-body check, CSW agreed
+conclusions, treaty-body general comments, SRSG/mandate reports, declarations). It samples
+29/30 train documents correctly, but test coverage drops to 91.4%: 235 documents return
+`None`, mostly Resolutions (182) whose first pages lack the header phrases the extractor
+requires. The most common wrong labels are Resolution→Special Procedures' report (16) and
+Resolution→CSW Agreed Conclusions (13). This is an authoring-sample coverage limit, not a
+test-set tuning issue: the 50/30 train sample simply does not exhibit every resolution
+header variant. It is reported as-is because phase 1 fixes the admin agent's prompt and
+sampling behavior.
+
+**Two scoring views.** Our evaluator normalizes document codes (case/punctuation/spacing), so
+a prediction `A/RES/64/74` matches gold `A/RES/64/74*`. The admin agent's own
+`extraction_eval` compares rendered display strings, so it counts those 82 starred gold codes
+as mismatches: 8,190 matched / 263 mismatched / 55 missing (96.26%) versus our 8,272 hit /
+181 wrong / 55 missing. Neither is wrong for its purpose; our normalization is the benchmark
+rule used to compare methods, and the admin view is recorded as-is. The two views agree on
+every other document for this field.
+
 **Status:** phase 1 covers single Plan fields. UPR `state_reviewed` is a relationship
 property (it needs State sharedIds, not just a label) and UPR recommendations are
 record-creation tasks, so neither is attempted here. The full `GenerateScriptUseCase`
