@@ -724,6 +724,36 @@ compilation strategy of v1. The title was doing the work in v2; without it, the 
 converges to the obvious heuristic. Coverage is 99.98% (only 2 missing), so the remaining
 error is wrong-year choice, not abstention.
 
+**Full Plan sweep under v3 (no title, target removed from execution metadata):**
+
+| Dataset | Train | Test | Test hit / wrong / missing | Coverage | Author requests | Tokens |
+|---|---:|---:|---|---:|---:|---:|
+| `plan_year` | 0.920 | 0.932 | 9,288 / 675 / 2 | 99.98% | 12 | 734,535 |
+| `plan_document_code` | 0.760 | 0.974 | 8,241 / 134 / 83 | 99.0% | 13 | 972,044 |
+| `plan_document_type` | 0.940 | 0.885 | 2,412 / 263 / 50 | 98.2% | 21 | 2,889,624 |
+| `plan_legal_status` | 1.000 | 0.968 | 2,639 / 17 / 69 | 97.5% | 13 | 1,611,385 |
+| `plan_means_of_adoption` | 0.857 | 0.709 | 1,932 / 792 / 0 | 100.0% | 14 | 1,808,253 |
+| `plan_body` | 0.760 | **0.055** | 550 / 1,525 / 8,012 | 20.6% | 16 | 2,018,858 |
+| `plan_field_month` | 0.940 | 0.915 | 1,386 / 124 / 5 | 99.7% | 16 | 1,304,856 |
+| `plan_field_document_number` | 0.540 | 0.606 | 722 / 105 / 364 | 69.1% | 21 | 3,976,425 |
+
+Three results need context:
+
+- **`plan_body` is not a valid capability result under the current split.** Train has 50
+  documents and **50 distinct body labels** (one each, rare-first stratification) and
+  **zero** General Assembly / Human Rights Council documents. Test is 89.7% those two
+  classes: 6,359 GA + 2,691 HRC of 10,087. The extractor authored rules for the rare labels
+  it could see (and got 0.760 on train), then returned `None` for the two dominant test
+  classes. That is a split-design failure, not an agent failure; exclude `plan_body` from
+  admin-agent comparisons until a body-specific split covers the dominant classes.
+- **`plan_means_of_adoption` (0.709)** produced a value for every test document; the errors
+  are label ambiguity, mainly N.A.→Consensus (378), Vote→N.A. (195), and Consensus→N.A.
+  (104). This is a genuine three-way classification difficulty, not abstention.
+- **`plan_field_document_number` (0.606, 69.1% coverage)** is the weakest legitimate field:
+  identifiers are inconsistent across documents and the extractor abstained on 364 test
+  documents. `plan_document_code` (0.974) and `plan_legal_status` (0.968) are strong;
+  `plan_field_month` (0.915) is close behind.
+
 **Two scoring views.** Our evaluator normalizes document codes (case/punctuation/spacing), so
 a prediction `A/RES/64/74` matches gold `A/RES/64/74*`. The admin agent's own
 `extraction_eval` compares rendered display strings, so it counts those 82 starred gold codes
@@ -732,10 +762,10 @@ as mismatches: 8,190 matched / 263 mismatched / 55 missing (96.26%) versus our 8
 rule used to compare methods, and the admin view is recorded as-is. The two views agree on
 every other document for this field.
 
-**Status:** phase 1 covers single Plan fields. UPR `state_reviewed` is a relationship
-property (it needs State sharedIds, not just a label) and UPR recommendations are
-record-creation tasks, so neither is attempted here. The full `GenerateScriptUseCase`
-bulk-script path is out of scope by design.
+**Status:** the no-title v3 adapter now covers all eight single Plan fields with gold. UPR
+`state_reviewed` (relationship; labels now, State sharedIds for a write) is next, then UPR
+recommendations as record extraction. The full `GenerateScriptUseCase` bulk-script path
+remains out of scope.
 
 ### What the v2 numbers show
 
