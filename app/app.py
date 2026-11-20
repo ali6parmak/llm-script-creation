@@ -15,12 +15,15 @@ import pandas as pd
 import streamlit as st
 from theme import (
     PALETTE,
+    THEMES,
     TYPE_COLORS,
     badge,
     inject_css,
     metric_style,
+    set_theme,
     status_badge,
     status_style,
+    theme_names,
 )
 
 from llm_script_creation import catalog
@@ -30,7 +33,6 @@ from llm_script_creation.db import document_from_row
 from llm_script_creation.text import document_payload
 
 st.set_page_config(page_title="Uwazi extraction benchmarks", layout="wide")
-inject_css()
 
 SPLITS = ["all", "train", "dev", "test"]
 STATUS_OPTIONS = ["hit", "partial", "wrong", "missing_prediction", "error"]
@@ -841,6 +843,12 @@ def main() -> None:
     methods = load_methods()
 
     page = st.sidebar.radio("View", ["Datasets", "Sample explorer", "Methods", "Compare"])
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Theme")
+    theme_name = st.sidebar.selectbox("Color palette", theme_names(), key="theme_name")
+    set_theme(theme_name)
+    inject_css()
+    st.sidebar.caption(THEMES[theme_name]["description"])
     st.sidebar.markdown("---")
     st.sidebar.caption(
         f"{len(datasets)} datasets · {sum(row['sample_count'] for row in datasets):,} samples"
