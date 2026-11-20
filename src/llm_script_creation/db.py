@@ -5,6 +5,7 @@ Join chain: entities.sharedId -> files.entity -> segmentations.fileID
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Iterator
 from functools import lru_cache
 from typing import Any
@@ -128,3 +129,20 @@ def iter_documents(
         count += 1
         if limit is not None and count >= limit:
             break
+
+
+def document_from_row(row: dict[str, Any]) -> Document:
+    """Reconstruct a Document from a catalog `documents` row."""
+    return Document(
+        entity_id=row["doc_id"],
+        shared_id=row["doc_id"],
+        title=row["title"],
+        language=row["language"],
+        template=row["template"],
+        metadata=json.loads(row["metadata_json"] or "{}"),
+        file_id=row.get("file_id"),
+        filename=row.get("filename"),
+        mimetype=row.get("mimetype"),
+        total_pages=row.get("page_count"),
+        segments=[Segment.from_mongo(item) for item in json.loads(row["segments_json"])],
+    )

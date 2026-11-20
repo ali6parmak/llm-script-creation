@@ -350,7 +350,8 @@ def aggregate_upr_state(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def aggregate_upr(records: list[dict[str, Any]]) -> dict[str, Any]:
     totals = Counter()
-    text_scores = []
+    text_score_sum = 0.0
+    text_score_count = 0
     country_correct = 0
     country_total = 0
     exact_numbers = 0
@@ -361,8 +362,9 @@ def aggregate_upr(records: list[dict[str, Any]]) -> dict[str, Any]:
         totals["prediction_count"] += metrics.get("prediction_count", 0)
         totals["matched"] += metrics.get("matched", 0)
         totals["paragraph_tp"] += metrics.get("paragraph_tp", 0)
-        if metrics.get("text_f1") is not None:
-            text_scores.append(metrics["text_f1"])
+        if metrics.get("matched"):
+            text_score_sum += metrics.get("text_f1", 0.0) * metrics["matched"]
+            text_score_count += metrics["matched"]
         country_correct += metrics.get("country_correct", 0)
         country_total += metrics.get("country_total", 0)
         exact_numbers += metrics.get("exact_numbers", 0)
@@ -384,7 +386,7 @@ def aggregate_upr(records: list[dict[str, Any]]) -> dict[str, Any]:
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "text_f1": sum(text_scores) / len(text_scores) if text_scores else 0.0,
+        "text_f1": text_score_sum / text_score_count if text_score_count else 0.0,
         "country_accuracy": country_correct / country_total if country_total else None,
         "exact_number_accuracy": exact_numbers / matched if matched else None,
         "state_accuracy": state_correct / len(records) if records else 0.0,

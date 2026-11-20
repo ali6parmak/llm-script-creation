@@ -61,11 +61,18 @@ def write_run(
     run: dict[str, Any],
     records: list[dict[str, Any]],
     metrics: dict[str, Any],
+    *,
+    prompt: str | None = None,
+    script: str | None = None,
 ) -> Path:
     directory = RUNS_DIR / run["run_id"]
     directory.mkdir(parents=True, exist_ok=True)
     _dump(directory / "run.json", {**run, "metrics": metrics})
     _dump(directory / "metrics.json", metrics)
+    if prompt is not None:
+        (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
+    if script is not None:
+        (directory / "script.py").write_text(script, encoding="utf-8")
     with (directory / "predictions.jsonl").open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
