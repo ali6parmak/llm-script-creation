@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 inspect-data = "llm_script_creation.inspect_data:main"
 build-datasets = "llm_script_creation.datasets:main"
+run-baselines = "llm_script_creation.experiments:main"
 
 [dependency-groups]
 dev = [

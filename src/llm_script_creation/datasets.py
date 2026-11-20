@@ -24,13 +24,14 @@ from typing import Any
 from pymongo.database import Database
 
 from . import catalog
-from .configuration import ARTIFACTS_DIR, DATASETS_DIR
+from .configuration import ARTIFACTS_DIR, DATASETS_DIR, STATES_PATH
 from .db import (
     PLAN_DB,
     PLAN_DOCUMENT_TEMPLATE,
     UPR_DB,
     UPR_DOCUMENT_TEMPLATE,
     UPR_RECOMMENDATION_TEMPLATE,
+    UPR_STATE_TEMPLATE,
     get_db,
     iter_entities,
     load_document,
@@ -374,6 +375,26 @@ def build_documents() -> int:
 
 
 # ---------------------------------------------------------------------------
+# State list
+
+
+def build_states() -> int:
+    """Write the canonical UPR state/country list used by evaluation and prompts."""
+    db = get_db(UPR_DB)
+    states = []
+    for entity in iter_entities(db, template_id=UPR_STATE_TEMPLATE, language="en"):
+        label = entity.get("title", "")
+        if not label or label == "_Unknown":
+            continue
+        codes = metadata_values(entity.get("metadata"), "country_code")
+        states.append({"label": label, "code": codes[0] if codes else ""})
+    states.sort(key=lambda item: item["label"])
+    STATES_PATH.write_text(json.dumps(states, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  states: {len(states)} candidates -> {STATES_PATH}", flush=True)
+    return len(states)
+
+
+# ---------------------------------------------------------------------------
 # Dataset building
 
 
@@ -529,8 +550,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  reusing {catalog.count_documents(conn):,} documents")
 
     if args.documents_only:
+        build_states()
         return 0
 
+    build_states()
     print(f"Building datasets into {ARTIFACTS_DIR / 'datasets'}…")
     summary = build_datasets()
     print(f"Built {len(summary)} datasets.")

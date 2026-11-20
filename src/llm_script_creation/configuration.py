@@ -30,6 +30,7 @@ WORK_DIR = Path(os.getenv("WORK_DIR", PROJECT_ROOT / "work"))
 ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", PROJECT_ROOT / "artifacts"))
 DATASETS_DIR = ARTIFACTS_DIR / "datasets"
 CATALOG_PATH = ARTIFACTS_DIR / "catalog.db"
+STATES_PATH = ARTIFACTS_DIR / "states.json"
 
 for _directory in (REPORTS_DIR, RESULTS_DIR, WORK_DIR, ARTIFACTS_DIR):
     _directory.mkdir(parents=True, exist_ok=True)
