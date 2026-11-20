@@ -6,6 +6,8 @@ import json
 from typing import Any
 
 from .evaluation import field_kind
+from .input_spec import InputSpec, payload_excerpt, prepare_input
+from .models import Document
 from .normalization import load_states
 
 SYSTEM_PROMPT = """You write one deterministic Python extraction script for Uwazi documents.
@@ -156,58 +158,31 @@ def _task_instructions(dataset: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _excerpt_from_text(text: str, dataset_id: str, limit: int = 4500) -> str:
-    if dataset_id == "upr_recommendations":
-        marker = text.lower().find("recommendations will be examined")
-        if marker >= 0:
-            start = max(0, marker - 500)
-            return text[start : start + limit]
-    return text[:limit]
+def prompt_focuses(dataset_id: str) -> tuple[str, ...]:
+    """Strings used to center a prompt excerpt inside the transformed input."""
+    return {
+        "upr_recommendations": (
+            "recommendations will be examined",
+            "Recommendations",
+        ),
+        "upr_state": ("Report of the Working Group",),
+        "plan_year": ("Distr.: General", "adopted"),
+        "plan_document_code": ("A/", "S/", "C0", "E/"),
+    }.get(dataset_id, ())
 
 
-def _segments_excerpt(
-    segments: list[dict[str, Any]],
-    dataset_id: str,
-    *,
-    include_position: bool,
-    include_type: bool,
-    limit: int = 18,
-) -> list[dict[str, Any]]:
-    start = 0
-    if dataset_id == "upr_recommendations":
-        import re
-
-        for index, segment in enumerate(segments):
-            if re.search(r"(?<![\d.])([1-9]\d{0,2}\.\d{1,3})(?![\d.])", segment.get("text", "")):
-                start = max(0, index - 2)
-                break
-    selected = segments[start : start + limit]
-    output = []
-    for segment in selected:
-        item = {"text": " ".join(str(segment.get("text", "")).split())}
-        if include_type:
-            item["type"] = segment.get("type")
-        if include_position:
-            item.update(
-                page=segment.get("page"),
-                top=segment.get("top"),
-                left=segment.get("left"),
-                width=segment.get("width"),
-                height=segment.get("height"),
-            )
-        output.append(item)
-    return output
+def example_payload(document: Document, spec: InputSpec) -> dict[str, Any]:
+    """Payload a prompt example is built from; identical to execution."""
+    return prepare_input(document, spec)
 
 
 def _example_block(
     example: dict[str, Any],
     dataset_id: str,
     fields: list[str],
-    representation: str,
-    include_position: bool,
-    include_type: bool,
+    spec: InputSpec,
 ) -> str:
-    document = example["document"]
+    document: Document = example["document"]
     gold = example["gold"]
     if dataset_id == "upr_recommendations" and len(gold.get("recommendations", [])) > 8:
         gold = dict(gold)
@@ -215,20 +190,35 @@ def _example_block(
         gold["_note"] = "example truncated to 8 recommendations"
     elif dataset_id not in {"upr_state", "upr_recommendations"} and len(fields) == 1:
         gold = {"value": gold.get(fields[0])}
-    if representation == "text":
-        body = _excerpt_from_text(document["text"], dataset_id)
-        input_block = f"```text\n{body}\n```"
-    else:
-        segments = _segments_excerpt(
-            json.loads(document["segments_json"]),
-            dataset_id,
-            include_position=include_position,
-            include_type=include_type,
+
+    payload = example_payload(document, spec)
+    body, truncated = payload_excerpt(
+        payload,
+        spec,
+        focuses=prompt_focuses(dataset_id),
+    )
+    language = "text" if spec.representation == "text" else "json"
+    total = (
+        len(payload["text"])
+        if spec.representation == "text"
+        else len(payload.get("segments") or [])
+    )
+    unit = "characters" if spec.representation == "text" else "segments"
+    shown = len(body) if spec.representation == "text" else len(json.loads(body))
+    if truncated:
+        label = (
+            f"Excerpt of the transformed input ({shown:,} of {total:,} {unit}; the script "
+            f"receives {spec.describe()})."
         )
-        input_block = f"```json\n{json.dumps(segments, ensure_ascii=False, indent=1)}\n```"
+    else:
+        label = (
+            f"Transformed input ({total:,} {unit}; this is exactly what the script receives: "
+            f"{spec.describe()})."
+        )
+    input_block = f"```{language}\n{body}\n```"
     return (
         f"EXAMPLE {example['doc_id']}\n"
-        f"Input excerpt (truncated; the real script receives the full document):\n{input_block}\n"
+        f"{label}\n{input_block}\n"
         f"Expected output:\n```json\n{json.dumps(gold, indent=2, ensure_ascii=False)}\n```"
     )
 
@@ -236,24 +226,19 @@ def _example_block(
 def build_messages(
     dataset: dict[str, Any],
     examples: list[dict[str, Any]],
-    *,
-    representation: str = "text",
-    include_position: bool = False,
-    include_type: bool = False,
+    spec: InputSpec | None = None,
 ) -> list[dict[str, str]]:
     dataset_id = dataset["dataset_id"]
-    if representation == "text":
+    spec = spec or InputSpec()
+    if spec.representation == "text":
         input_description = (
-            "`document` has keys: `id`, `language`, `page_count`, `text` (full document text, "
-            "segments joined in reading order). There is no `title` key."
+            "`document` has keys: `id`, `language`, `page_count`, `text`. The text is "
+            f"{spec.describe()} (segments joined in reading order); there is no `title` key."
         )
     else:
         input_description = (
             "`document` has keys: `id`, `language`, `page_count`, `segments`. `segments` is a "
-            "list of objects with `text`"
-            + (", `type`" if include_type else "")
-            + (", `page`, `top`, `left`, `width`, `height`" if include_position else "")
-            + ". There is no `title` key."
+            f"list of objects: {spec.describe()}. There is no `title` key."
         )
     user_prompt = "\n\n".join(
         [
@@ -265,9 +250,7 @@ def build_messages(
                     example,
                     dataset_id,
                     list(dataset.get("target_schema", {})),
-                    representation,
-                    include_position,
-                    include_type,
+                    spec,
                 )
                 for example in examples
             ),

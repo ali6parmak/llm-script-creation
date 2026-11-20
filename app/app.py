@@ -30,6 +30,7 @@ from llm_script_creation import catalog
 from llm_script_creation import runs as run_artifacts
 from llm_script_creation.configuration import ARTIFACTS_DIR, CATALOG_PATH
 from llm_script_creation.db import document_from_row
+from llm_script_creation.input_spec import InputSpec, prepare_input
 from llm_script_creation.text import document_payload
 
 st.set_page_config(page_title="Uwazi extraction benchmarks", layout="wide")
@@ -369,8 +370,12 @@ def render_payload(document_row: dict[str, Any]) -> None:
         )
 
 
+def method_input_spec(method: dict[str, Any]) -> InputSpec:
+    return InputSpec.from_dict(method.get("input_spec") if method.get("type") == "llm_script" else None)
+
+
 def script_input_text(method: dict[str, Any], doc_row: dict[str, Any]) -> tuple[str, str, str]:
-    """Reconstruct the exact payload the generated script receives."""
+    """Reconstruct the exact transformed payload the generated script receives."""
     if method.get("type") == "rule_based":
         return (
             doc_row["text"],
@@ -379,53 +384,42 @@ def script_input_text(method: dict[str, Any], doc_row: dict[str, Any]) -> tuple[
         )
 
     document = document_from_row(doc_row)
-    representation = method.get("representation") or "text"
-    if representation == "text":
-        payload = document_payload(document, "text")
+    spec = method_input_spec(method)
+    payload = prepare_input(document, spec)
+    if spec.representation == "text":
         return (
             payload["text"],
             "text",
-            "Plain text: full document, segments joined in reading order.",
+            f"Transformed input: {spec.describe()}, segments joined in reading order. "
+            "This is exactly what the script received.",
         )
-    if representation == "segments-tsv":
-        payload = document_payload(
-            document,
-            "segments-tsv",
-            include_position=bool(method.get("include_position")),
-            include_type=bool(method.get("include_type")),
-        )
-        return payload["segments_tsv"], "text", "Segments as a TSV table (one line per segment)."
-    payload = document_payload(
-        document,
-        "segments-json",
-        include_position=bool(method.get("include_position")),
-        include_type=bool(method.get("include_type")),
-    )
     return (
         json.dumps(payload, indent=2, ensure_ascii=False),
         "json",
-        "Segments as structured JSON"
-        + (" with position" if method.get("include_position") else " without position")
-        + (" and type." if method.get("include_type") else " and without type."),
+        f"Transformed input: {spec.describe()}. This is exactly what the script received.",
     )
 
 
 def render_script_input(method: dict[str, Any], doc_row: dict[str, Any]) -> None:
     text, language, note = script_input_text(method, doc_row)
+    spec = method_input_spec(method) if method.get("type") == "llm_script" else None
     total = len(text)
     st.markdown("### Input sent to the script")
+    window = badge(spec.describe(), PALETTE["green"]) if spec else badge("full document", PALETTE["green"])
     st.markdown(
-        f"{badge(f'{total:,} chars', PALETTE['blue'])}{badge('full content', PALETTE['green'])}",
+        f"{badge(f'{total:,} chars', PALETTE['blue'])}{window}",
         unsafe_allow_html=True,
     )
     st.caption(note)
     if total <= 4000:
         st.code(text, language=language, height=360, wrap_lines=True)
-        st.caption(f"This is the full input the script received ({total:,} characters).")
+        st.caption(
+            f"This is the full transformed input the script received ({total:,} characters)."
+        )
         return
 
-    options = ["First 4,000 characters", "Last 4,000 characters", "Full input"]
-    default = "First 4,000 characters" if total > 12000 else "Full input"
+    options = ["First 4,000 characters", "Last 4,000 characters", "Full transformed input"]
+    default = "First 4,000 characters" if total > 12000 else "Full transformed input"
     choice = st.radio(
         "Input preview",
         options,
@@ -433,22 +427,25 @@ def render_script_input(method: dict[str, Any], doc_row: dict[str, Any]) -> None
         horizontal=True,
         key=f"input_preview_{method['method_id']}",
     )
-    if choice == "Full input":
+    if choice == "Full transformed input":
         shown = text
         st.caption(
-            f"Full input: all {total:,} characters. This is exactly what the script received."
+            f"Full transformed input: all {total:,} characters. "
+            "This is exactly what the script received."
         )
         height = 500
     elif choice == "Last 4,000 characters":
         shown = text[-4000:]
         st.caption(
-            f"Showing the last 4,000 of {total:,} characters. The script still received the full input."
+            f"Showing the last 4,000 of {total:,} transformed characters. "
+            "The script received the full transformed input."
         )
         height = 360
     else:
         shown = text[:4000]
         st.caption(
-            f"Showing the first 4,000 of {total:,} characters. The script still received the full input."
+            f"Showing the first 4,000 of {total:,} transformed characters. "
+            "The script received the full transformed input."
         )
         height = 360
     st.code(shown, language=language, height=height, wrap_lines=True)

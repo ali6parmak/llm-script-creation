@@ -20,7 +20,7 @@ from .evaluation import (
     evaluate_upr_sample,
     evaluate_upr_state_sample,
 )
-from .text import document_payload
+from .input_spec import InputSpec, prepare_input
 
 
 def _load_dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
@@ -33,21 +33,13 @@ def _load_dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
     return dataset
 
 
-def _payload(
-    row: dict[str, Any],
-    representation: str,
-    include_position: bool,
-    include_type: bool,
-) -> dict[str, Any]:
-    document = document_from_row(row)
-    if representation == "text":
-        return document_payload(document, "text")
-    return document_payload(
-        document,
-        "segments-json",
-        include_position=include_position,
-        include_type=include_type,
-    )
+def execution_payload(document: Any, spec: InputSpec) -> dict[str, Any]:
+    """Payload passed to `extract`; the single execution-side entry point."""
+    return prepare_input(document, spec)
+
+
+def _payload_for_row(row: dict[str, Any], spec: InputSpec) -> dict[str, Any]:
+    return execution_payload(document_from_row(row), spec)
 
 
 def _select_examples(conn: Any, dataset_id: str, count: int) -> list[dict[str, Any]]:
@@ -67,7 +59,7 @@ def _select_examples(conn: Any, dataset_id: str, count: int) -> list[dict[str, A
             {
                 "doc_id": sample["doc_id"],
                 "gold": json.loads(sample["gold_json"]),
-                "document": dict(row),
+                "document": document_from_row(dict(row)),
             }
         )
     return examples
@@ -161,7 +153,7 @@ def _smoke_check(
                 )
     if outputs and hits == 0:
         return (
-            "smoke predictions are valid JSON but do not match any dev gold example",
+            "smoke predictions are valid JSON but do not match any train gold example",
             None,
             json.dumps(outputs[0], ensure_ascii=False)[:800] if outputs else None,
             json.dumps(golds[0], ensure_ascii=False)[:800] if golds else None,
@@ -204,17 +196,13 @@ def _evaluate(
     samples: list[dict[str, Any]],
     conn: Any,
     script: str,
-    representation: str,
-    include_position: bool,
-    include_type: bool,
+    spec: InputSpec,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     fields = list(dataset["target_schema"])
     payloads = (
-        _payload(
+        _payload_for_row(
             dict(catalog.get_document(conn, dataset["db"], sample["doc_id"])),
-            representation,
-            include_position,
-            include_type,
+            spec,
         )
         for sample in samples
     )
@@ -294,10 +282,11 @@ def _evaluate(
 def generate(
     dataset_id: str,
     *,
-    split: str = "dev",
+    input_spec: InputSpec | None = None,
     representation: str = "text",
     include_position: bool = False,
     include_type: bool = False,
+    split: str = "train",
     examples_count: int = 2,
     limit: int | None = None,
     max_attempts: int = 3,
@@ -311,18 +300,17 @@ def generate(
 ) -> int:
     if not CATALOG_PATH.exists():
         raise SystemExit("Catalog missing. Run `uv run build-datasets` first.")
+    spec = input_spec or InputSpec(
+        representation=representation,  # type: ignore[arg-type]
+        include_position=include_position,
+        include_type=include_type,
+    )
     conn = catalog.connect()
     try:
         dataset = _load_dataset(conn, dataset_id)
         fields = list(dataset["target_schema"])
         examples = _select_examples(conn, dataset_id, examples_count)
-        messages = prompts.build_messages(
-            dataset,
-            examples,
-            representation=representation,
-            include_position=include_position,
-            include_type=include_type,
-        )
+        messages = prompts.build_messages(dataset, examples, spec)
         prompt_text = "\n\n".join(
             f"{message['role'].upper()}:\n{message['content']}" for message in messages
         )
@@ -341,11 +329,9 @@ def generate(
         smoke_samples = samples[:3]
         smoke_golds = [json.loads(sample["gold_json"]) for sample in smoke_samples]
         smoke_payloads = [
-            _payload(
+            _payload_for_row(
                 dict(catalog.get_document(conn, dataset["db"], sample["doc_id"])),
-                representation,
-                include_position,
-                include_type,
+                spec,
             )
             for sample in smoke_samples
         ]
@@ -419,26 +405,23 @@ def generate(
 
         prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:12]
         now = datetime.now(UTC).isoformat()
-        flags = "pos" if include_position else "nopos"
         model_slug = re.sub(r"[^a-z0-9]+", "_", model.casefold()).strip("_")
         method_id = (
-            f"llm_{dataset_id}_{representation}_{flags}_{examples_count}ex_"
-            f"{model_slug}_{prompt_hash[:6]}"
+            f"llm_{dataset_id}_{spec.slug()}_{examples_count}ex_{model_slug}_{prompt_hash[:6]}"
         )
         method = {
             "method_id": method_id,
-            "name": method_name or f"LLM script — {dataset_id} / {representation} / {flags}",
+            "name": method_name or f"LLM script — {dataset_id} / {spec.describe()}",
             "description": method_description
             or "Generated extraction script with the configured prompt and examples.",
             "type": "llm_script",
             "dataset_id": dataset_id,
             "task": dataset["task"],
             "model": model,
-            "representation": representation,
-            "include_position": include_position,
-            "include_type": include_type,
+            "input_spec": spec.to_dict(),
             "examples": [example["doc_id"] for example in examples],
-            "prompt_version": "v1",
+            "prompt_version": "v2",
+            "split_policy_version": dataset["manifest"].get("split_policy_version"),
             "prompt_hash": prompt_hash,
             "attempts": len(attempts),
             "response_model": response_model,
@@ -483,9 +466,7 @@ def generate(
             samples,
             conn,
             final_code,
-            representation,
-            include_position,
-            include_type,
+            spec,
         )
         run_id = runs.new_run_id(method_id, dataset_id, split)
         run = {
@@ -508,8 +489,12 @@ def generate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--split", default="dev", choices=["train", "dev", "test", "all"])
+    parser.add_argument("--split", default="train", choices=["train", "test", "all"])
     parser.add_argument("--representation", default="text", choices=["text", "segments"])
+    parser.add_argument("--head-chars", type=int, default=None)
+    parser.add_argument("--tail-chars", type=int, default=None)
+    parser.add_argument("--head-segments", type=int, default=None)
+    parser.add_argument("--tail-segments", type=int, default=None)
     parser.add_argument("--include-position", action="store_true")
     parser.add_argument("--include-type", action="store_true")
     parser.add_argument("--examples", type=int, default=2)
@@ -528,12 +513,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--method-description", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    return generate(
-        args.dataset,
-        split=args.split,
+    input_spec = InputSpec(
         representation=args.representation,
+        head_chars=args.head_chars,
+        tail_chars=args.tail_chars,
+        head_segments=args.head_segments,
+        tail_segments=args.tail_segments,
         include_position=args.include_position,
         include_type=args.include_type,
+    )
+    return generate(
+        args.dataset,
+        input_spec=input_spec,
+        split=args.split,
         examples_count=args.examples,
         limit=args.limit,
         max_attempts=args.max_attempts,
