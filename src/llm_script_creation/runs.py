@@ -57,6 +57,31 @@ def new_run_id(method_id: str, dataset_id: str, split: str) -> str:
     return f"{stamp}_{slug(method_id)}_{slug(dataset_id)}_{split}"
 
 
+def _round_summary(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "round": item["round"],
+        "kind": item["kind"],
+        "model": item.get("model"),
+        "usage": item.get("usage", {}),
+        "validation_issues": item.get("issues", []),
+        "empty_response": item.get("empty_response", False),
+        "train_score": item.get("score"),
+        "train_nonexample_score": item.get("nonexample_score"),
+        "train_metrics": item.get("train_metrics", {}),
+        "train_nonexample_metrics": item.get("nonexample_metrics", {}),
+        "failure_count": item.get("failure_count", 0),
+        "crash_count": item.get("crash_count", 0),
+        "selected_failures": [
+            {
+                "doc_id": record.get("doc_id"),
+                "status": record.get("status"),
+                "error": (record.get("error") or "")[:500],
+            }
+            for record in item.get("selected", [])
+        ],
+    }
+
+
 def write_run(
     run: dict[str, Any],
     records: list[dict[str, Any]],
@@ -64,10 +89,20 @@ def write_run(
     *,
     prompt: str | None = None,
     script: str | None = None,
+    rounds: Iterable[dict[str, Any]] = (),
 ) -> Path:
     directory = RUNS_DIR / run["run_id"]
     directory.mkdir(parents=True, exist_ok=True)
-    _dump(directory / "run.json", {**run, "metrics": metrics})
+    round_items = list(rounds)
+    round_summaries = [_round_summary(item) for item in round_items]
+    _dump(
+        directory / "run.json",
+        {
+            **run,
+            "metrics": metrics,
+            "rounds": run.get("rounds") or round_summaries,
+        },
+    )
     _dump(directory / "metrics.json", metrics)
     if prompt is not None:
         (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -76,7 +111,39 @@ def write_run(
     with (directory / "predictions.jsonl").open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    for item in round_items:
+        round_dir = directory / "rounds" / f"round-{item['round']}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        _dump(round_dir / "round.json", _round_summary(item))
+        (round_dir / "script.py").write_text(item.get("code", ""), encoding="utf-8")
+        (round_dir / "response.txt").write_text(item.get("response", ""), encoding="utf-8")
+        if item.get("feedback"):
+            (round_dir / "feedback.txt").write_text(item["feedback"], encoding="utf-8")
+        _dump(round_dir / "messages.json", item.get("messages", []))
+        with (round_dir / "predictions.jsonl").open("w", encoding="utf-8") as handle:
+            for record in item.get("records", []):
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     return directory
+
+
+def list_rounds(run_id: str) -> list[dict[str, Any]]:
+    directory = RUNS_DIR / run_id / "rounds"
+    if not directory.exists():
+        return []
+    rounds = []
+    for path in directory.glob("round-*/round.json"):
+        try:
+            rounds.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(rounds, key=lambda item: item.get("round", 0))
+
+
+def load_round(run_id: str, round_index: int) -> dict[str, Any] | None:
+    path = RUNS_DIR / run_id / "rounds" / f"round-{round_index}" / "round.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def list_methods() -> list[dict[str, Any]]:
