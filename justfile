@@ -16,6 +16,9 @@ inspect:
 build:
     UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run build-datasets
 
+baselines:
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run run-baselines
+
 app:
     UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run streamlit run app/app.py
 
