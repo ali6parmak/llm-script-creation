@@ -205,6 +205,29 @@ def inject_css() -> None:
             border-radius: 10px;
             overflow: hidden;
         }}
+        [data-testid="stTable"] table {{
+            background: var(--gb-bg1) !important;
+            color: var(--gb-fg) !important;
+            border-color: var(--gb-bg2) !important;
+        }}
+        [data-testid="stTable"] th {{
+            background: var(--gb-bg2) !important;
+            color: var(--gb-fg) !important;
+            border-color: var(--gb-bg3) !important;
+        }}
+        [data-testid="stTable"] td {{
+            color: var(--gb-fg) !important;
+            border-color: var(--gb-bg2) !important;
+        }}
+        [data-testid="stTable"] tr:nth-child(odd) td {{
+            background: var(--gb-bg0);
+        }}
+        [data-testid="stTable"] tr:nth-child(even) td {{
+            background: var(--gb-bg1);
+        }}
+        [data-testid="stTable"] tr:hover td {{
+            background: var(--gb-bg2);
+        }}
         [data-baseweb="select"] > div,
         [data-baseweb="input"] > div,
         [data-testid="stTextInput"] input,
@@ -213,6 +236,14 @@ def inject_css() -> None:
             background-color: var(--gb-bg1) !important;
             color: var(--gb-fg) !important;
             border-color: var(--gb-bg2) !important;
+        }}
+        [data-baseweb="select"] *,
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] div {{
+            color: var(--gb-fg) !important;
+        }}
+        [data-baseweb="select"] svg {{
+            fill: var(--gb-fg2) !important;
         }}
         [data-baseweb="popover"], [role="listbox"] {{
             background-color: var(--gb-bg1) !important;
@@ -232,9 +263,22 @@ def inject_css() -> None:
             color: var(--gb-yellow);
             border-color: var(--gb-yellow);
         }}
-        [data-testid="stCode"] pre, [data-testid="stCode"] code {{
+        [data-testid="stCode"] pre, [data-testid="stCode"] code,
+        [data-testid="stCodeBlock"] pre, [data-testid="stCodeBlock"] code {{
             background: var(--gb-bg1) !important;
             color: var(--gb-fg) !important;
+        }}
+        [data-testid="stText"], [data-testid="stText"] pre,
+        [data-testid="stText"] code {{
+            color: var(--gb-fg) !important;
+        }}
+        textarea {{
+            color: var(--gb-fg) !important;
+            background-color: var(--gb-bg1) !important;
+            caret-color: var(--gb-yellow) !important;
+        }}
+        button[data-testid="stCopyButton"] {{
+            color: var(--gb-fg2) !important;
         }}
         button[kind="secondary"], button[kind="primary"] {{
             border-color: var(--gb-bg2) !important;
@@ -388,3 +432,31 @@ def metric_style(frame: pd.DataFrame, columns: list[str]) -> Any:
         return f"background-color:{_rgba(hex_color, 0.15)}; color:{hex_color}; font-weight:600"
 
     return frame.style.map(color, subset=present)
+
+
+def table_style(
+    frame: pd.DataFrame,
+    *,
+    status_column: str | None = None,
+    metric_columns: list[str] | None = None,
+) -> Any:
+    """Combined Styler for HTML tables (status cells + metric gradients)."""
+    styler = frame.style
+    if status_column and status_column in frame.columns:
+
+        def status_color(value: Any) -> str:
+            hex_color = STATUS_COLORS.get(str(value), PALETTE["gray"])
+            return f"background-color:{_rgba(hex_color, 0.18)}; color:{hex_color}; font-weight:600"
+
+        styler = styler.map(status_color, subset=[status_column])
+    present = [column for column in (metric_columns or []) if column in frame.columns]
+    if present:
+
+        def metric_color(value: Any) -> str:
+            if not isinstance(value, (int, float)) or pd.isna(value):
+                return ""
+            hex_color = score_color(float(value))
+            return f"background-color:{_rgba(hex_color, 0.16)}; color:{hex_color}; font-weight:600"
+
+        styler = styler.map(metric_color, subset=present)
+    return styler

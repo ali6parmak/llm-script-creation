@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from typing import Any
 
 import pandas as pd
@@ -19,10 +20,9 @@ from theme import (
     TYPE_COLORS,
     badge,
     inject_css,
-    metric_style,
     set_theme,
     status_badge,
-    status_style,
+    table_style,
     theme_names,
 )
 
@@ -118,6 +118,40 @@ def fmt(value: Any, digits: int = 3) -> str:
     if isinstance(value, float):
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def show_table(
+    frame: pd.DataFrame,
+    *,
+    status: bool = False,
+    metrics: list[str] | None = None,
+    height: int | str = "auto",
+    max_rows: int = 100,
+) -> None:
+    if frame.empty:
+        st.caption("No rows.")
+        return
+    shown = frame.head(max_rows)
+    st.table(
+        table_style(shown, status_column="status" if status else None, metric_columns=metrics),
+        width="stretch",
+        height=height,
+    )
+    if len(frame) > max_rows:
+        st.caption(f"Showing {max_rows:,} of {len(frame):,} rows.")
+
+
+def paginate(frame: pd.DataFrame, page_size: int, key: str) -> pd.DataFrame:
+    pages = max(1, math.ceil(len(frame) / page_size))
+    page = st.selectbox(
+        "Page",
+        list(range(1, pages + 1)),
+        index=0,
+        key=f"page_{key}",
+        format_func=lambda value: f"{value} / {pages}",
+    )
+    start = (int(page) - 1) * page_size
+    return frame.iloc[start : start + page_size]
 
 
 def metric_value(run: dict[str, Any] | None, metric: str) -> float | None:
@@ -230,7 +264,7 @@ def render_gold(gold: dict[str, Any]) -> None:
         recs = pd.DataFrame(gold["recommendations"])
         if not recs.empty:
             recs["countries"] = recs["countries"].apply(lambda value: ", ".join(value))
-        st.dataframe(recs, width="stretch", hide_index=True)
+        show_table(recs, height=400, max_rows=300)
     else:
         st.json(gold)
 
@@ -263,10 +297,10 @@ def render_prediction(record: dict[str, Any], dataset_id: str) -> None:
             ("Missed gold", "missed", PALETTE["red"]),
             ("Extra predictions", "extras", PALETTE["purple"]),
         ):
-            rows = details.get(key) or []
+            rows = [{"status": key, **row} for row in (details.get(key) or [])]
             st.markdown(f"**{title}** {badge(len(rows), color)}", unsafe_allow_html=True)
             if rows:
-                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                show_table(pd.DataFrame(rows), status=True, height=300, max_rows=100)
     elif dataset_id == "upr_state":
         left, right = st.columns(2)
         left.metric("Gold", details.get("gold_state") or "—")
@@ -284,8 +318,7 @@ def render_prediction(record: dict[str, Any], dataset_id: str) -> None:
             for field, item in fields.items()
         ]
         if rows:
-            frame = pd.DataFrame(rows)
-            st.dataframe(status_style(frame), width="stretch", hide_index=True)
+            show_table(pd.DataFrame(rows), status=True, height=300, metrics=["token F1"])
     with st.expander("Raw prediction JSON"):
         st.json(record.get("prediction"))
 
@@ -310,30 +343,27 @@ def render_payload(document_row: dict[str, Any]) -> None:
     )
     if representation == "text":
         st.caption("Plain text: segments joined in reading order; layout is lost.")
-        st.text_area(
-            "Payload text",
-            payload["text"],
-            height=420,
-            disabled=True,
-            label_visibility="collapsed",
-        )
+        st.code(payload["text"], language="text", height=420, wrap_lines=True)
     elif representation == "segments-tsv":
         st.caption(
             "TSV: a compact table (page, top, left, width, height, type, text) as one string."
         )
-        st.code(payload["segments_tsv"], language="text")
+        st.code(payload["segments_tsv"], language="text", height=420, wrap_lines=True)
     else:
         st.caption("JSON: a list of structured segment objects with layout fields.")
-        st.json(payload)
+        st.code(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            language="json",
+            height=420,
+            wrap_lines=True,
+        )
 
 
 def document_excerpt(doc_row: dict[str, Any], limit: int = 4000) -> None:
     st.caption(f"First {limit:,} characters. Full text is in the Sample explorer.")
-    with st.container(height=320, border=True):
-        st.text(doc_row["text"][:limit])
+    st.code(doc_row["text"][:limit], language="text", height=320, wrap_lines=True)
     with st.expander("Full document text"):
-        with st.container(height=500, border=True):
-            st.text(doc_row["text"])
+        st.code(doc_row["text"], language="text", height=500, wrap_lines=True)
 
 
 # ---------------------------------------------------------------------------
@@ -404,10 +434,10 @@ def page_datasets(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]
         elif isinstance(distribution, dict):
             for key, values in distribution.items():
                 st.caption(key)
-                st.dataframe(
+                show_table(
                     pd.DataFrame(values.items(), columns=["value", "count"]),
-                    width="stretch",
-                    hide_index=True,
+                    height=240,
+                    max_rows=60,
                 )
     st.markdown("**Known issues**")
     for issue in manifest.get("known_issues", []):
@@ -430,11 +460,7 @@ def page_datasets(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]
     ]
     if dataset_run_rows:
         st.markdown("**Runs on this dataset**")
-        st.dataframe(
-            status_style(pd.DataFrame(dataset_run_rows)),
-            width="stretch",
-            hide_index=True,
-        )
+        show_table(pd.DataFrame(dataset_run_rows), status=True, height=300, max_rows=100)
 
 
 def page_sample_explorer(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
@@ -489,26 +515,27 @@ def page_sample_explorer(datasets: list[dict[str, Any]], run_index: list[dict[st
     columns = ["doc_id", "title", "split", "pages", "segments", "chars"]
     if selected_run:
         columns.insert(3, "status")
-    frame = filtered[columns]
-    if selected_run:
-        frame = status_style(frame)
-    event = st.dataframe(
-        frame,
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
+    page_rows = paginate(filtered, 50, key=f"sample_{dataset_id}")
+    show_table(
+        page_rows[columns],
+        status=selected_run is not None,
+        height=340,
+        max_rows=50,
     )
-    selected_rows = event.selection.rows if event and event.selection else []
-    if selected_rows:
-        st.session_state["selected_doc_id"] = filtered.iloc[selected_rows[0]]["doc_id"]
-
-    doc_id = st.session_state.get("selected_doc_id")
-    if doc_id not in set(filtered["doc_id"]):
-        doc_id = filtered.iloc[0]["doc_id"] if not filtered.empty else None
-    if not doc_id:
+    if page_rows.empty:
         st.info("No samples match the current filters.")
         return
+    options = page_rows["doc_id"].tolist()
+    previous = st.session_state.get("selected_doc_id")
+    index = options.index(previous) if previous in options else 0
+    titles = dict(zip(page_rows["doc_id"], page_rows["title"], strict=False))
+    doc_id = st.selectbox(
+        "Select sample",
+        options,
+        index=index,
+        format_func=lambda value: titles.get(value, value),
+    )
+    st.session_state["selected_doc_id"] = doc_id
 
     sample = filtered[filtered["doc_id"] == doc_id].iloc[0]
     doc_row = load_document(dataset["db"], doc_id)
@@ -544,15 +571,13 @@ def page_sample_explorer(datasets: list[dict[str, Any]], run_index: list[dict[st
     tab_names.append("Script payload")
     tabs = st.tabs(tab_names)
     with tabs[0]:
-        with st.container(height=560, border=True):
-            st.text(doc_row["text"])
+        st.code(doc_row["text"], language="text", height=560, wrap_lines=True)
     with tabs[1]:
         segments = pd.DataFrame(json.loads(doc_row["segments_json"]))
-        st.dataframe(
+        show_table(
             segments[["page", "text", "type", "top", "left", "width", "height"]],
-            width="stretch",
-            hide_index=True,
-            column_config={"text": st.column_config.TextColumn(width="large")},
+            height=520,
+            max_rows=400,
         )
     with tabs[2]:
         render_gold(sample["gold"])
@@ -681,25 +706,31 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
     ]
     st.markdown(
         f'<div class="uw-section-note">{len(filtered):,} samples · '
-        f"{len(records):,} predictions loaded. Select a row to inspect it.</div>",
+        f"{len(records):,} predictions loaded. Select a sample below.</div>",
         unsafe_allow_html=True,
     )
-    event = st.dataframe(
-        status_style(filtered[display_columns]),
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
+    page_rows = paginate(filtered, 50, key=f"method_{selected}")
+    show_table(
+        page_rows[display_columns],
+        status=True,
+        metrics=["f1"],
+        height=340,
+        max_rows=50,
     )
-    selected_rows = event.selection.rows if event and event.selection else []
-    if selected_rows:
-        st.session_state[f"method_doc_{selected}"] = filtered.iloc[selected_rows[0]]["doc_id"]
-    doc_id = st.session_state.get(f"method_doc_{selected}")
-    if doc_id not in set(filtered["doc_id"]):
-        doc_id = filtered.iloc[0]["doc_id"] if not filtered.empty else None
-    if not doc_id:
+    if page_rows.empty:
         st.info("No samples match the filters.")
         return
+    options = page_rows["doc_id"].tolist()
+    previous = st.session_state.get(f"method_doc_{selected}")
+    index = options.index(previous) if previous in options else 0
+    titles = dict(zip(page_rows["doc_id"], page_rows["title"], strict=False))
+    doc_id = st.selectbox(
+        "Select sample",
+        options,
+        index=index,
+        format_func=lambda value: titles.get(value, value),
+    )
+    st.session_state[f"method_doc_{selected}"] = doc_id
 
     sample = samples[samples["doc_id"] == doc_id].iloc[0]
     record = records.get(doc_id)
@@ -758,7 +789,7 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
             if data.get("code"):
                 st.code(data["code"], language="python")
             with st.expander("Raw response"):
-                st.text(data.get("response", ""))
+                st.code(data.get("response", ""), language="text", height=300, wrap_lines=True)
     with tabs[3]:
         st.json(metrics)
 
@@ -808,7 +839,13 @@ def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
     st.caption(
         f"Latest run per method × dataset · metric `{metric}` · green is better, red is worse."
     )
-    st.dataframe(metric_style(table, list(table.columns)), width="stretch")
+    matrix = table.reset_index()
+    show_table(
+        matrix,
+        metrics=[column for column in matrix.columns if column in table.columns],
+        height=400,
+        max_rows=50,
+    )
     st.markdown("**Method legend**")
     legend = []
     for method_id in table.index:
@@ -822,7 +859,7 @@ def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
                 "model": method.get("model", ""),
             }
         )
-    st.dataframe(pd.DataFrame(legend), width="stretch", hide_index=True)
+    show_table(pd.DataFrame(legend), height=300, max_rows=50)
     if len(table.columns):
         st.caption(f"Datasets in this matrix: {', '.join(sorted(table.columns))}")
 
