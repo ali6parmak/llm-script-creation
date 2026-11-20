@@ -14,7 +14,7 @@ Uwazi metadata. Read `PLAN.md` first. Generated data reports live in `reports/`.
 
 - Python 3.12, `uv` for environment/dependencies, pytest, ruff.
 - MongoDB at `localhost:27017` (databases `plan`, `upr`), accessed with `pymongo`.
-- LLM: Ollama's OpenAI-compatible API, model constant in
+- LLM: Ollama native `/api/chat` API, model constant in
   `src/llm_script_creation/configuration.py` (`MODEL`), default
   `deepseek-v4.1-flash:cloud`.
 - Source package: `src/llm_script_creation/`
@@ -45,7 +45,7 @@ uv run inspect-data                 # both databases → reports/data_report.md
 uv run inspect-data --db plan
 uv run build-datasets               # catalog + all datasets (rebuild docs unless --skip-documents)
 uv run run-baselines --split dev    # deterministic baselines + run artifacts
-uv run generate-script --dataset plan_year --split dev --model qwen2.5-coder:14b
+uv run generate-script --dataset plan_year --split dev
 uv run streamlit run app/app.py
 uv run pytest -q
 uv run ruff check src tests app
@@ -120,14 +120,14 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   allowlist, and wall-clock/memory limits. Never pass `.env` or host credentials.
 - Reject scripts that open files, use network/subprocess, or import outside the allowlist.
 - Log every prompt, raw LLM response, generated script (including failed attempts), repair
-  feedback, and final frozen script under `results/<run-id>/`.
+  feedback, and final frozen script under `artifacts/runs/<run_id>/`.
 - Do not tune prompts/examples on the test split. Examples come from train only.
 - Use temperature 0 for reproducibility unless an experiment explicitly varies it; record
   the exact model id and token usage.
-- Cloud models tested (including `deepseek-v4.1-flash:cloud`) often spend the whole completion
-  budget on hidden `reasoning` and return empty `content`. The pipeline stores
-  `finish_reason`, `reasoning`, and usage; use a local instruct/coder model for now and pass
-  `--model`. Do not silently change the default `MODEL` constant.
+- Use Ollama's native `/api/chat` endpoint with `think: false` for cloud reasoning models.
+  The OpenAI-compatible `/v1/chat/completions` endpoint ignored `think`; the native endpoint
+  returns final content. `generate-script` defaults to `--think off` and records
+  `finish_reason`, reasoning, and usage. Do not silently change the default `MODEL` constant.
 - Direct per-document LLM extraction, if added, is a baseline — label it as such, do not mix
   it into script-generation results.
 

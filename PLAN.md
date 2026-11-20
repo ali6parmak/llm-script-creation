@@ -540,46 +540,52 @@ Baselines (deterministic regex/heuristics):
 | `upr_state` | accuracy 1.000 |
 | `upr_recommendations` | P 0.959 / R 0.703 / F1 0.811 |
 
-First LLM-generated scripts (dev, `qwen2.5-coder:14b` unless noted):
+First LLM-generated scripts (dev, `deepseek-v4.1-flash:cloud`, native API with
+`think: false`):
 
 | Dataset | Result |
 |---|---|
-| `plan_year` / text | accuracy 0.603 (first 4-digit year anywhere; ignores date hints) |
-| `plan_year` / text (llama3.2:3b) | accuracy 0.610 |
-| `plan_year` / segments+position | accuracy 0.926 — but the generated script ignored positions, so this is not evidence that layout caused the gain |
-| `plan_document_code` / text | accuracy 0.713, token F1 0.843 |
-| `upr_state` | 0.000 — generated scripts returned empty or missed the split title line |
-| `upr_recommendations` / text | P 0.892 / R 0.289 / F1 0.437; country 0.921; exact number 0.983; state 0.000 |
+| `plan_year` / text | accuracy 0.841 (baseline 0.926) |
+| `plan_year` / segments+position | accuracy 0.827 — no gain over text on this task |
+| `plan_document_code` / text | accuracy 0.883, token F1 0.933 (baseline 0.944) |
+| `upr_state` / text | accuracy 0.935 (baseline 1.000) |
+| `upr_recommendations` / text | P 0.877 / R 0.356 / F1 0.506; country 0.966; exact number 0.937; state 1.000 |
+| `upr_recommendations` / segments+position | P 0.878 / R 0.355 / F1 0.506 — same as text |
 
-These are **not** tuned final results. They already show the main failure modes:
+These are **not** tuned final results. They already show useful patterns:
 
-- A single prompt can produce very different scripts across runs (the segment-aware year
-  script happened to use `match.group()` while the text script used `findall()` with a
-  capturing group), so the position comparison above is confounded until we control for
-  script quality.
-- LLM scripts miss the difference between "first year in the text" and "document year".
-- Plain-text UPR titles can be split across lines (`Report of the Working Group ...` /
-  `Review *` / `Albania`); generated scripts assume the state is the immediate next line.
-- A single recommendation paragraph may contain several recommendations, and UPR state
-  extraction and paragraph splitting need explicit structural instructions.
-- A valid JSON shape can still be semantically wrong; the smoke repair loop now checks a
-  few dev examples and feeds mismatches back to the model.
+- The LLM gets close to the baseline on UPR state (0.935 vs 1.000) but still misses the
+  split title line on two documents.
+- Plan year and document code remain below the baseline. The LLM scripts do not yet beat
+  simple regex heuristics.
+- Segment layout did **not** improve these two tasks. That is a legitimate negative result:
+  for year/document-code and recommendation extraction, reading order/layout was not the
+  bottleneck.
+- Recommendation recall is the main gap (0.356): the scripts find a subset of paragraphs
+  with high precision (0.877) and near-perfect text F1 (0.998).
+- A single prompt can produce very different scripts across runs. The compare page should
+  not be read as a clean ablation until we run multiple attempts/seeds per method.
 
-### Model note
+### Model note / cloud fix
 
-`deepseek-v4.1-flash:cloud` (and the other cloud models tested) spent the entire completion
-budget on hidden reasoning and returned empty `content` for these prompts, even at 16k
-tokens. The pipeline records `finish_reason`, `reasoning`, token usage, and every attempt.
-For the first experiments I used local coder/instruct models via `--model`
-(`qwen2.5-coder:14b`, `llama3.2:3b`). The configured `MODEL` constant remains the default;
-switching the default is a deliberate decision, not a silent change.
+The native Ollama `/api/chat` endpoint exposes a `think` control. Setting
+`"think": false` makes `deepseek-v4.1-flash:cloud` return final content immediately
+(~3 seconds for the year prompt). The OpenAI-compatible `/v1/chat/completions` endpoint
+ignored `think` and the reasoning models spent the whole completion budget on hidden
+reasoning with empty `content`.
+
+`llm.py` now uses the native endpoint and records `message.thinking`, `done_reason`,
+prompt/eval token counts, and every attempt. The configured `MODEL` remains
+`deepseek-v4.1-flash:cloud`; `generate-script` exposes `--think off|low|high|max`, defaulting
+to `off`. Local-model experiment artifacts were removed.
 
 ### Known issues / next
 
-1. Improve prompts/representations for UPR state and recommendation extraction; segment
-   types are likely the right representation for split title lines.
-2. Test `segments` vs `text` on the same dataset; current UPR runs are text-only.
-3. Run frozen scripts on the test split (not done yet).
-4. Add a run summary/report command so results do not only live in the UI.
+1. UPR recommendation recall is still low; inspect the generated script and paragraph
+   splitting rules before adding more prompt variants.
+2. Run frozen scripts on the test split (not done yet).
+3. Run multiple generation attempts per method to separate prompt/representation effects
+   from code-generation variance.
+4. Add a plain-text run summary alongside the Streamlit viewer.
 5. Review the `upr_recommendations` gold noise and sub-number matching before drawing strong
    conclusions.

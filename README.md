@@ -30,12 +30,12 @@ uv run ruff check src tests
 Generate an LLM script and immediately evaluate it on the dev split:
 
 ```bash
-uv run generate-script \
-  --dataset plan_year \
-  --split dev \
-  --model qwen2.5-coder:14b \
-  --examples 2
+uv run generate-script --dataset plan_year --split dev --examples 2
 ```
+
+Cloud models run through Ollama's native `/api/chat` endpoint with `think: false` so
+reasoning models return final content instead of spending the whole budget on hidden
+reasoning. Use `--think low|high|max` if you want to test thinking output.
 
 The prompt, every attempt, the frozen script, predictions, and metrics are written under
 `artifacts/methods/<method_id>/` and `artifacts/runs/<run_id>/`. The viewer picks them up
@@ -103,6 +103,7 @@ The end-to-end prototype is working: catalog/datasets, viewer, rule-based baseli
 LLM-generated-script pipeline. First dev results and model notes are in
 [PLAN.md §14](PLAN.md#14-implementation-status-and-first-results-2026-11-20).
 
-Note: the configured `deepseek-v4.1-flash:cloud` returned empty content because it consumed
-its budget on hidden reasoning for these prompts. Use `--model qwen2.5-coder:14b` (or another
-local instruct/coder model) for now; the pipeline records the actual model and usage.
+Model note: `deepseek-v4.1-flash:cloud` is the default and works with `think: false`.
+The OpenAI-compatible `/v1/chat/completions` endpoint ignored `think` and returned empty
+content; the native endpoint fixed it. The pipeline records the actual model, reasoning,
+`done_reason`, token usage, and every attempt.
