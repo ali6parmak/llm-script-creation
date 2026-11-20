@@ -203,7 +203,10 @@ def _example_block(
         if spec.representation == "text"
         else len(payload.get("segments") or [])
     )
-    unit = "characters" if spec.representation == "text" else "segments"
+    if spec.representation == "text":
+        unit = "character" if total == 1 else "characters"
+    else:
+        unit = "segment" if total == 1 else "segments"
     shown = len(body) if spec.representation == "text" else len(json.loads(body))
     if truncated:
         label = (

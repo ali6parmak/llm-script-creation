@@ -159,3 +159,29 @@ def test_segment_prompt_excerpt_is_json_of_transformed_segments() -> None:
     shown = json.loads(excerpt)
     assert len(shown) == 5
     assert shown[0]["text"] == "number 96.1 starts here"
+
+
+def test_segment_prompt_example_uses_transformed_segments_only() -> None:
+    doc = document(
+        [
+            segment("INSIDE-SEGMENT"),
+            segment("OUTSIDE-SEGMENT"),
+            segment("ALSO-OUTSIDE"),
+        ]
+    )
+    spec = InputSpec(representation="segments", head_segments=1, include_type=True)
+    example = {"doc_id": "shared-id", "gold": {"value": "x"}, "document": doc}
+    messages = prompts.build_messages(
+        {
+            "dataset_id": "plan_document_code",
+            "manifest": {"name": "toy", "description": "toy"},
+            "target_schema": {"document_code": {"type": "string"}},
+        },
+        [example],
+        spec,
+    )
+    prompt = "\n\n".join(message["content"] for message in messages)
+    assert "INSIDE-SEGMENT" in prompt
+    assert "OUTSIDE-SEGMENT" not in prompt
+    assert "ALSO-OUTSIDE" not in prompt
+    assert "first 1 segments" in prompt
