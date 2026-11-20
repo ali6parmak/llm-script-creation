@@ -604,30 +604,81 @@ def page_sample_explorer(datasets: list[dict[str, Any]], run_index: list[dict[st
         render_payload(doc_row)
 
 
-def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
-    st.subheader("Methods")
-    methods = load_methods()
-    if not methods:
-        st.info("No method artifacts yet. Run a baseline or an LLM experiment.")
-        return
-    dataset_by_id = {row["dataset_id"]: row for row in datasets}
+def method_comparison_table(
+    methods: list[dict[str, Any]], run_index: list[dict[str, Any]], dataset: dict[str, Any]
+) -> None:
+    rows = []
+    optional_metrics: set[str] = set()
+    for method in methods:
+        runs = method_runs(method["method_id"], run_index)
+        if not runs:
+            continue
+        run = runs[0]
+        metrics = run.get("metrics", {})
+        counts = metrics.get("status_counts") or run.get("counts", {})
+        metric_name, score = primary_metric(dataset, run)
+        row = {
+            "method": method.get("name", method["method_id"]),
+            "type": method.get("type", ""),
+            "model": method.get("model") or "—",
+            "split": run["split"],
+            "samples": metrics.get("documents", metrics.get("total", 0)),
+            "metric": metric_name,
+            "score": score,
+            "hits": counts.get("hit", 0),
+            "partial": counts.get("partial", 0),
+            "wrong": counts.get("wrong", 0),
+            "missing": counts.get("missing_prediction", 0),
+            "errors": counts.get("error", 0),
+            "description": (method.get("description") or "")[:110],
+        }
+        for key in ("precision", "recall"):
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                row[key] = value
+                optional_metrics.add(key)
+        rows.append(row)
 
-    columns = st.columns(3)
-    for index, method in enumerate(methods):
-        dataset = dataset_by_id.get(method.get("dataset_id", ""))
-        with columns[index % 3]:
-            st.markdown(method_card(method, run_index, dataset), unsafe_allow_html=True)
-
-    selected = st.selectbox(
-        "Open method",
-        [method["method_id"] for method in methods],
-        format_func=lambda value: next(
-            (method.get("name", value) for method in methods if method["method_id"] == value),
-            value,
-        ),
+    st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
+    st.subheader("Method comparison")
+    st.caption(
+        "Latest run per method for this dataset. Status counts are document-level; "
+        "score is the dataset's primary metric."
     )
-    method = next(item for item in methods if item["method_id"] == selected)
-    dataset = dataset_by_id.get(method.get("dataset_id", ""))
+    if not rows:
+        st.info("No methods have run on this dataset yet.")
+        return
+    columns = [
+        "method",
+        "type",
+        "model",
+        "split",
+        "samples",
+        "metric",
+        "score",
+        "hits",
+        "partial",
+        "wrong",
+        "missing",
+        "errors",
+        *[key for key in ("precision", "recall") if key in optional_metrics],
+        "description",
+    ]
+    frame = pd.DataFrame(rows)[columns]
+    show_table(
+        frame,
+        metrics=["score", *[key for key in ("precision", "recall") if key in optional_metrics]],
+        height=440,
+        max_rows=50,
+    )
+
+
+def render_method_detail(
+    method: dict[str, Any],
+    dataset: dict[str, Any] | None,
+    run_index: list[dict[str, Any]],
+    selected: str,
+) -> None:
     color = TYPE_COLORS.get(method.get("type", ""), PALETTE["gray"])
     metric_name, value = primary_metric(dataset, latest_run(selected, run_index))
     st.markdown(
@@ -802,6 +853,62 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
                 st.code(data.get("response", ""), language="text", height=300, wrap_lines=True)
     with tabs[3]:
         show_json(metrics)
+
+
+def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
+    st.subheader("Methods")
+    all_methods = load_methods()
+    if not all_methods:
+        st.info("No method artifacts yet. Run a baseline or an LLM experiment.")
+        return
+    dataset_by_id = {row["dataset_id"]: row for row in datasets}
+    available_datasets = [
+        row
+        for row in datasets
+        if any(m.get("dataset_id") == row["dataset_id"] for m in all_methods)
+    ]
+    if not available_datasets:
+        st.info("No datasets have methods yet.")
+        return
+
+    dataset_id = st.selectbox(
+        "Dataset",
+        [row["dataset_id"] for row in available_datasets],
+        format_func=lambda value: next(
+            (
+                json.loads(row["manifest_json"]).get("name", value)
+                for row in available_datasets
+                if row["dataset_id"] == value
+            ),
+            value,
+        ),
+    )
+    dataset = dataset_by_id[dataset_id]
+    methods = [m for m in all_methods if m.get("dataset_id") == dataset_id]
+    methods.sort(key=lambda m: m.get("name", m["method_id"]))
+
+    show_cards = st.toggle(
+        "Show method cards",
+        value=True,
+        help="Hide the gallery when there are too many methods.",
+    )
+    if show_cards and methods:
+        columns = st.columns(3)
+        for index, method in enumerate(methods):
+            with columns[index % 3]:
+                st.markdown(method_card(method, run_index, dataset), unsafe_allow_html=True)
+
+    selected = st.selectbox(
+        "Open method",
+        [method["method_id"] for method in methods],
+        format_func=lambda value: next(
+            (method.get("name", value) for method in methods if method["method_id"] == value),
+            value,
+        ),
+    )
+    method = next(item for item in methods if item["method_id"] == selected)
+    render_method_detail(method, dataset, run_index, selected)
+    method_comparison_table(methods, run_index, dataset)
 
 
 def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
