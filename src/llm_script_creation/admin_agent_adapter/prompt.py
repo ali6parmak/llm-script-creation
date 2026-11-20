@@ -6,12 +6,20 @@ classes, ordered fallbacks) comes from
 ``uwazi_admin_agent.use_cases.author_extractor_tool``. We only say WHAT to
 extract and WHERE the text comes from.
 
+The task deliberately does NOT inject a list of shared_ids. The admin agent's
+extractor discovers its own samples through ``query_entities``; pre-selecting
+documents in the task would anchor sampling and deviate from the real workflow.
+
 Main-process safe: stdlib only.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+
+#: Version of the authoring task contract. Bumped when the task text changes so
+#: method artifacts from different prompt variants stay distinguishable.
+PROMPT_VERSION = "admin-agent-v2-no-ids"
 
 _VALUE_SHAPES = {
     "numeric": "an int, e.g. 2019 (not a string)",
@@ -38,7 +46,6 @@ def build_author_task(
     property_name: str,
     property_type: str,
     template_name: str,
-    train_shared_ids: Iterable[str],
     train_total: int,
     allowed_values: Iterable[str] | None = None,
     language: str = "en",
@@ -46,10 +53,9 @@ def build_author_task(
 ) -> str:
     """Build the precise authoring task for one property.
 
-    ``train_shared_ids`` must come from the train split only: test documents are
-    never placed in the authoring request.
+    Only a COUNT of train documents is disclosed; the extractor discovers the
+    documents itself. No test document is ever in the authoring request.
     """
-    ids = list(train_shared_ids)
     value_shape = _VALUE_SHAPES.get(property_type, "a JSON-serializable value")
     allowed_block = ""
     if allowed_values:
@@ -92,12 +98,9 @@ SOURCE: {source_label}
 
 TRAINING EVIDENCE (the ONLY documents you may look at)
 - {train_total} train document(s) are available through the read-only ports.
-  Use `query_entities(mode="by_template", template_name="{template_name}",
-  language="{language}")`, then sample 8-12 of them with
-  `peek_segmentation_by_entity`. `query_entities(mode="by_ids")` is capped at
-  five ids per call, so prefer `peek_segmentation_by_entity` directly.
-- Candidate train shared_ids:
-{_bullet_list(ids)}
+  Discover them with `query_entities(mode="by_template",
+  template_name="{template_name}", language="{language}")`, then sample 8-12 of
+  them with `peek_segmentation_by_entity`.
 - After drafting `extract`, SELF-PROVE it on the sampled literal
   (text, ctx) pairs before emitting, as your system prompt requires. Use
   `benchmark_extractor` when comparing competing strategies; it scores against

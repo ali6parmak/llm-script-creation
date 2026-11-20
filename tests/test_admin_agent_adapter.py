@@ -81,7 +81,6 @@ def test_prompt_states_source_output_and_train_only() -> None:
         property_name="year",
         property_type="numeric",
         template_name="Document",
-        train_shared_ids=["id-1", "id-2"],
         train_total=2,
     )
 
@@ -92,7 +91,9 @@ def test_prompt_states_source_output_and_train_only() -> None:
     assert '`"\\n".join(p["text"] for p in seg["paragraphs"])`' in task
     assert '{"shared_id": str, "title": str, "metadata": {property: [values]}}' in task
     assert "peek_segmentation_by_entity" in task
-    assert "id-1" in task
+    # No injected sample list: the extractor discovers entities itself.
+    assert "Candidate train shared_ids" not in task
+    assert "by_ids" not in task
     assert "test" not in task.lower().replace("latest", "")
 
 
@@ -102,7 +103,6 @@ def test_prompt_lists_allowed_select_values() -> None:
         property_name="document_type",
         property_type="select",
         template_name="Document",
-        train_shared_ids=["id-1"],
         train_total=1,
         allowed_values=["Resolution", "Report"],
     )

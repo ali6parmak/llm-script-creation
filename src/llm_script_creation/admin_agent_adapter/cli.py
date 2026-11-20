@@ -264,7 +264,6 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         property_name=field,
         property_type=property_type,
         template_name=template["name"],
-        train_shared_ids=[record["shared_id"] for record in train_records],
         train_total=len(train_records),
         allowed_values=_allowed_values(property_type, train_records, field),
     )
@@ -368,9 +367,11 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
 
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
-    method_id = f"admin_agent_{dataset_id}_{model_slug}"
+    prompt_slug = runs.slug(prompt.PROMPT_VERSION).removeprefix("admin_agent_")
+    method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}"
     config = {
         "condition": "production_context",
+        "prompt_version": prompt.PROMPT_VERSION,
         "title_visible": True,
         "metadata_visible": True,
         "source": "primary-document segmentation",
@@ -389,7 +390,7 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     }
     method = evaluate.build_method(
         method_id=method_id,
-        name=f"Admin agent extractor — {dataset_id}",
+        name=f"Admin agent extractor — {dataset_id} ({prompt.PROMPT_VERSION})",
         description=(
             "The real Uwazi admin agent's nested extractor subagent authors `def extract(text, ctx)` "
             "from primary-document segmentation on the train split (title and metadata visible = "
@@ -408,6 +409,7 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         train_documents=len(train_records),
         test_documents=test_count,
         created_at=now,
+        prompt_version=prompt.PROMPT_VERSION,
     )
     attempt = {
         "round": 1,

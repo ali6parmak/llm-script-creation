@@ -134,6 +134,7 @@ def build_method(
     train_documents: int,
     test_documents: int,
     created_at: str,
+    prompt_version: str,
 ) -> dict[str, Any]:
     return {
         "method_id": method_id,
@@ -145,7 +146,7 @@ def build_method(
         "model": model,
         "input_spec": {"representation": "text", "source": "primary-document segmentation"},
         "examples": [],
-        "prompt_version": "admin-agent-v1",
+        "prompt_version": prompt_version,
         "split_policy_version": manifest.get("split_policy_version"),
         "train_documents": train_documents,
         "test_documents": test_documents,

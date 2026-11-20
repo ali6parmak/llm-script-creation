@@ -647,7 +647,9 @@ MongoDB.
 | `plan_document_code` | 0.800 | **0.973** (8,232 / 8,458) | −0.173 | 99.4% | 96.3% (8,508 judged) | 8,232 hit · 178 wrong · 48 missing | 13 | 1,186,141 |
 | `plan_document_type` | 0.940 | **0.894** (2,437 / 2,725) | +0.046 | 91.4% | 89.5% (2,775 judged) | 2,437 hit · 53 wrong · 235 missing | 18 | 2,954,941 |
 
-The 5/5 spike scored 5/5 train and 5/5 test (admin eval 100%). On the full run the admin
+The three rows above used prompt v1, which listed up to 20 train shared_ids in the task
+(the variant discussed below). The 5/5 spike scored 5/5 train and 5/5 test (admin eval 100%).
+On the full run the admin
 agent sampled 12 train documents with `peek_segmentation_by_entity` and used
 `benchmark_extractor` three times. The returned function uses ordered fallbacks: a
 compilation-entry lookup keyed on the entity's own `field_document_number` metadata (needed
@@ -676,6 +678,29 @@ Resolution→CSW Agreed Conclusions (13). This is an authoring-sample coverage l
 test-set tuning issue: the 50/30 train sample simply does not exhibit every resolution
 header variant. It is reported as-is because phase 1 fixes the admin agent's prompt and
 sampling behavior.
+
+**Prompt variant v2: no injected shared_ids.** Prompt v1 listed up to 20 train shared_ids in
+the task. That was an adapter convenience, not part of the admin agent's own workflow, and it
+risked anchoring which documents the extractor sampled. `prompt.PROMPT_VERSION =
+"admin-agent-v2-no-ids"` removes the list and the `by_ids` hint; the task now states only the
+train count and tells the extractor to discover samples with
+`query_entities(mode="by_template")`. Re-running `plan_year` gives:
+
+| `plan_year` prompt | Train | Test | Test hit / wrong / missing | Author requests | Tokens |
+|---|---:|---:|---|---:|---:|
+| v1 (ids injected) | 0.960 | 0.934 | 9,304 / 628 / 33 | 14 | 1,089,919 |
+| v2 (no ids) | 0.900 | 0.939 | 9,360 / 517 / 88 | 18 | 1,907,173 |
+
+The +0.005 test difference is **not** a clean id-list effect: the v2 extractor chose a
+different first rule — the year in the entity TITLE, e.g. `... (2011)` — before any
+segmentation rule. 7,258 of the 9,965 test documents carry a `(YYYY)` in the title; v2
+predicts that title year for all 7,258 and gets 7,233 right (99.7%). On the remaining 2,707
+documents it scores 0.786. The v1 extractor did not use the title. So v2's test number is
+mostly a **title shortcut** under the production-context condition, not a better document
+reader; its lower train score and extra 55 missing predictions also show it is not simply
+"better". Removing the ids was still the right call, but it cannot be evaluated in isolation
+while the title is visible. The **no-title condition is now the necessary next experiment**,
+not an optional one.
 
 **Two scoring views.** Our evaluator normalizes document codes (case/punctuation/spacing), so
 a prediction `A/RES/64/74` matches gold `A/RES/64/74*`. The admin agent's own

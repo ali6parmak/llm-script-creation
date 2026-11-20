@@ -43,6 +43,9 @@ data, then execute the returned `def extract(text, ctx)` with the admin agent's 
 Phase 1 uses the admin agent as-is (its model, its prompt, its tools). Title and Uwazi
 metadata stay visible: that is the **production-context** condition. The extractor is
 authored from the train split only; the untouched test split is used for one final execution.
+The benchmark task prompt deliberately does **not** inject a list of train shared_ids: the
+extractor discovers its own samples via `query_entities`, as it does in the real admin
+workflow. The prompt version is recorded in every method artifact.
 
 The admin agent keeps its own environment through a sidecar process
 (`scripts/admin_agent_sidecar.py`, run with `~/projects/python_uwazi_API/.venv`). Our main
