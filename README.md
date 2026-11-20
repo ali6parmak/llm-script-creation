@@ -90,8 +90,10 @@ artifacts/datasets/<id>/          # manifest.json + samples.jsonl (train/test)
 artifacts/methods/<id>/           # method.json (input_spec, rounds), prompt, script, attempts/
 artifacts/runs/<run_id>/          # run.json, metrics.json, predictions.jsonl, script.py
 artifacts/runs/<run_id>/rounds/   # per-round script, feedback, messages, metrics, predictions
-artifacts/archive/pre-v2/         # old dev-split methods/runs/datasets, not mixed with v2
 ```
+
+Old dev-split and pre-focus v2 artifacts were removed; only the final v2 datasets, methods,
+and runs remain.
 
 The catalog is the document/sample index used by experiments and the viewer. MongoDB remains
 the source of truth; rebuild the catalog with `uv run build-datasets`.

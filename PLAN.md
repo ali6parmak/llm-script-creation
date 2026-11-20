@@ -540,8 +540,8 @@ uv run streamlit run app/app.py
 The catalog is ~800 MB and lives in `artifacts/catalog.db` (gitignored). v2 dataset manifests
 and sample ids are in `artifacts/datasets/`. Methods and runs are self-describing JSON
 directories under `artifacts/methods/` and `artifacts/runs/`; the viewer reads them directly.
-Old dev-split artifacts are archived under `artifacts/archive/pre-v2/` and are not mixed with
-v2 runs.
+Old dev-split and pre-focus v2 artifacts were removed; `artifacts/` contains only the final
+v2 datasets, methods, and runs.
 
 Dataset sizes after v2 splitting (`train` is always 50; `test` excludes cross-dataset train
 documents):
