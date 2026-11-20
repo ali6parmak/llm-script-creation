@@ -395,7 +395,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
         "string",
         "value",
         "Extract the official document symbol/code (e.g. A/HRC/RES/14/1).",
-        "exact_match",
+        "accuracy",
     ),
     _plan_spec(
         "body",
@@ -419,7 +419,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
         "string",
         "value",
         "Extract the document number field used by the partner (often a resolution/page number).",
-        "exact_match",
+        "accuracy",
     ),
     DatasetSpec(
         dataset_id="plan_all_fields",
@@ -437,7 +437,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
         },
         known_issues=PLAN_KNOWN_ISSUES,
         gold=plan_all_fields_gold,
-        primary_metric="macro_accuracy",
+        primary_metric="accuracy",
     ),
     DatasetSpec(
         dataset_id="upr_state",
@@ -474,7 +474,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
         },
         known_issues=UPR_RECOMMENDATION_ISSUES,
         gold=upr_recommendations_gold,
-        primary_metric="recommendation_f1",
+        primary_metric="f1",
     ),
 )
 
