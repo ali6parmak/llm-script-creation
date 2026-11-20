@@ -369,11 +369,89 @@ def render_payload(document_row: dict[str, Any]) -> None:
         )
 
 
-def document_excerpt(doc_row: dict[str, Any], limit: int = 4000) -> None:
-    st.caption(f"First {limit:,} characters. Full text is in the Sample explorer.")
-    st.code(doc_row["text"][:limit], language="text", height=320, wrap_lines=True)
-    with st.expander("Full document text"):
-        st.code(doc_row["text"], language="text", height=500, wrap_lines=True)
+def script_input_text(method: dict[str, Any], doc_row: dict[str, Any]) -> tuple[str, str, str]:
+    """Reconstruct the exact payload the generated script receives."""
+    if method.get("type") == "rule_based":
+        return (
+            doc_row["text"],
+            "text",
+            "Rule-based baseline input: full document text plus the segment list.",
+        )
+
+    document = document_from_row(doc_row)
+    representation = method.get("representation") or "text"
+    if representation == "text":
+        payload = document_payload(document, "text")
+        return (
+            payload["text"],
+            "text",
+            "Plain text: full document, segments joined in reading order.",
+        )
+    if representation == "segments-tsv":
+        payload = document_payload(
+            document,
+            "segments-tsv",
+            include_position=bool(method.get("include_position")),
+            include_type=bool(method.get("include_type")),
+        )
+        return payload["segments_tsv"], "text", "Segments as a TSV table (one line per segment)."
+    payload = document_payload(
+        document,
+        "segments-json",
+        include_position=bool(method.get("include_position")),
+        include_type=bool(method.get("include_type")),
+    )
+    return (
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        "json",
+        "Segments as structured JSON"
+        + (" with position" if method.get("include_position") else " without position")
+        + (" and type." if method.get("include_type") else " and without type."),
+    )
+
+
+def render_script_input(method: dict[str, Any], doc_row: dict[str, Any]) -> None:
+    text, language, note = script_input_text(method, doc_row)
+    total = len(text)
+    st.markdown("### Input sent to the script")
+    st.markdown(
+        f"{badge(f'{total:,} chars', PALETTE['blue'])}{badge('full content', PALETTE['green'])}",
+        unsafe_allow_html=True,
+    )
+    st.caption(note)
+    if total <= 4000:
+        st.code(text, language=language, height=360, wrap_lines=True)
+        st.caption(f"This is the full input the script received ({total:,} characters).")
+        return
+
+    options = ["First 4,000 characters", "Last 4,000 characters", "Full input"]
+    default = "First 4,000 characters" if total > 12000 else "Full input"
+    choice = st.radio(
+        "Input preview",
+        options,
+        index=options.index(default),
+        horizontal=True,
+        key=f"input_preview_{method['method_id']}",
+    )
+    if choice == "Full input":
+        shown = text
+        st.caption(
+            f"Full input: all {total:,} characters. This is exactly what the script received."
+        )
+        height = 500
+    elif choice == "Last 4,000 characters":
+        shown = text[-4000:]
+        st.caption(
+            f"Showing the last 4,000 of {total:,} characters. The script still received the full input."
+        )
+        height = 360
+    else:
+        shown = text[:4000]
+        st.caption(
+            f"Showing the first 4,000 of {total:,} characters. The script still received the full input."
+        )
+        height = 360
+    st.code(shown, language=language, height=height, wrap_lines=True)
 
 
 # ---------------------------------------------------------------------------
@@ -801,18 +879,18 @@ def render_method_detail(
         f'<div class="uw-card-id">{html.escape(doc_id)}</div>',
         unsafe_allow_html=True,
     )
-    detail_tabs = st.tabs(["Prediction", "Gold", "Document excerpt"])
-    with detail_tabs[0]:
-        if record:
-            render_prediction(record, method.get("dataset_id", ""))
-        else:
-            st.info("No prediction for this sample in the selected run.")
-    with detail_tabs[1]:
-        render_gold(sample["gold"])
-    with detail_tabs[2]:
-        doc_row = load_document(dataset["db"], doc_id) if dataset else None
-        if doc_row:
-            document_excerpt(doc_row)
+    doc_row = load_document(dataset["db"], doc_id) if dataset else None
+    if doc_row:
+        render_script_input(method, doc_row)
+    st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
+    st.markdown("### Prediction")
+    if record:
+        render_prediction(record, method.get("dataset_id", ""))
+    else:
+        st.info("No prediction for this sample in the selected run.")
+    st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
+    st.markdown("### Gold")
+    render_gold(sample["gold"])
 
     directory = run_artifacts.METHODS_DIR / selected
     prompt_path = directory / "prompt.txt"
