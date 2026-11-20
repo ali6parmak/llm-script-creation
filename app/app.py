@@ -35,7 +35,8 @@ from llm_script_creation.text import document_payload
 
 st.set_page_config(page_title="Uwazi extraction benchmarks", layout="wide")
 
-SPLITS = ["all", "train", "dev", "test"]
+SPLITS = ["all", "train", "test"]
+SCORE_SPLITS = ["test", "train", "train_nonexample"]
 STATUS_OPTIONS = ["hit", "partial", "wrong", "missing_prediction", "error"]
 
 
@@ -168,25 +169,29 @@ def paginate(frame: pd.DataFrame, page_size: int, key: str) -> pd.DataFrame:
 def metric_value(run: dict[str, Any] | None, metric: str) -> float | None:
     if not run:
         return None
-    value = run.get("metrics", {}).get(metric)
+    metrics = run.get("metrics", {})
+    primary = metrics.get("primary")
+    if isinstance(primary, dict):
+        value = primary.get(metric)
+        return float(value) if isinstance(value, (int, float)) else None
+    value = metrics.get(metric)
     return float(value) if isinstance(value, (int, float)) else None
+
+
+def primary_metric_name(dataset: dict[str, Any] | None, run: dict[str, Any] | None) -> str:
+    metrics = (run or {}).get("metrics", {})
+    primary = metrics.get("primary")
+    if isinstance(primary, dict) and primary.get("metric"):
+        return str(primary["metric"])
+    if dataset:
+        return json.loads(dataset.get("manifest_json") or "{}").get("primary_metric") or "accuracy"
+    return "accuracy"
 
 
 def primary_metric(
     dataset: dict[str, Any] | None, run: dict[str, Any] | None
 ) -> tuple[str, float | None]:
-    if not dataset or not run:
-        return ("—", None)
-    manifest = json.loads(dataset.get("manifest_json") or "{}")
-    metric = manifest.get("primary_metric") or "accuracy"
-    value = metric_value(run, metric)
-    if value is not None:
-        return (metric, value)
-    for fallback in ("accuracy", "f1", "macro_f1", "state_accuracy", "exact_match"):
-        value = metric_value(run, fallback)
-        if value is not None:
-            return (fallback, value)
-    return (metric, None)
+    return (primary_metric_name(dataset, run), metric_value(run, "test"))
 
 
 def method_runs(method_id: str, run_index: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,7 +210,6 @@ def run_label(run: dict[str, Any]) -> str:
 def split_badge(split: str) -> str:
     color = {
         "train": PALETTE["blue"],
-        "dev": PALETTE["yellow"],
         "test": PALETTE["purple"],
     }.get(split, PALETTE["gray"])
     return badge(split, color)
@@ -231,8 +235,7 @@ def dataset_card(row: dict[str, Any], run_count: int) -> str:
       <div>{badge(row.get("task", ""), accent)}{badge(row.get("db", ""), PALETTE["gray"])}</div>
       <div class="uw-card-desc" style="margin-top:8px">{description}</div>
       <div class="uw-stat-row">
-        <div class="uw-stat"><b>{counts.get("total", 0):,}</b><span>samples</span></div>
-        <div class="uw-stat"><b>{counts.get("dev", 0):,}</b><span>dev</span></div>
+        <div class="uw-stat"><b>{counts.get("train", 0):,}</b><span>train</span></div>
         <div class="uw-stat"><b>{counts.get("test", 0):,}</b><span>test</span></div>
         <div class="uw-stat"><b>{run_count}</b><span>runs</span></div>
       </div>
@@ -245,7 +248,10 @@ def method_card(
 ) -> str:
     color = TYPE_COLORS.get(method.get("type", ""), PALETTE["gray"])
     run = latest_run(method["method_id"], run_index)
-    metric_name, value = primary_metric(dataset, run)
+    train_value = metric_value(run, "train")
+    test_value = metric_value(run, "test")
+    repair_rounds = method.get("repair_rounds", run.get("repair_rounds", 0) if run else 0)
+    examples = len(method.get("examples") or [])
     model = method.get("model") or "—"
     description = html.escape((method.get("description") or "")[:150])
     return f"""
@@ -256,10 +262,13 @@ def method_card(
         {badge(method.get("type", "method"), color)}
         {badge(method.get("dataset_id", ""), PALETTE["blue"])}
         {badge(model.replace(":cloud", ""), PALETTE["gray"])}
+        {badge(f"{examples} ex", PALETTE["aqua"])}
+        {badge(f"{repair_rounds} repairs", PALETTE["orange"])}
       </div>
       <div class="uw-card-desc" style="margin-top:8px">{description}</div>
       <div class="uw-stat-row">
-        <div class="uw-stat"><b>{fmt(value)}</b><span>{html.escape(metric_name)}</span></div>
+        <div class="uw-stat"><b>{fmt(train_value)}</b><span>train</span></div>
+        <div class="uw-stat"><b>{fmt(test_value)}</b><span>test</span></div>
         <div class="uw-stat"><b>{len(method_runs(method["method_id"], run_index))}</b><span>runs</span></div>
       </div>
     </div>
@@ -501,9 +510,12 @@ def page_datasets(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]
     )
     st.write(manifest.get("description", ""))
     counts = manifest.get("counts", {})
-    cols = st.columns(4)
-    for column, key in zip(cols, ("total", "train", "dev", "test"), strict=False):
-        column.metric(key.title(), f"{counts.get(key, 0):,}")
+    cols = st.columns(5)
+    for column, key in zip(
+        cols, ("total", "train", "test", "excluded_train_overlap"), strict=False
+    ):
+        label = "Excluded overlap" if key == "excluded_train_overlap" else key.title()
+        column.metric(label, f"{counts.get(key, 0):,}")
 
     left, right = st.columns([1, 1])
     with left:
@@ -532,20 +544,24 @@ def page_datasets(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]
         {
             "run": run["run_id"],
             "method": run["method_id"],
-            "split": run["split"],
+            "train": metric_value(run, "train"),
+            "test": metric_value(run, "test"),
+            "gap": metric_value(run, "gap"),
+            "repair rounds": run.get("repair_rounds", 0),
             "status": run["status"],
-            **{
-                key: run.get("metrics", {}).get(key)
-                for key in ("accuracy", "f1", "state_accuracy")
-                if key in run.get("metrics", {})
-            },
         }
         for run in run_index
         if run["dataset_id"] == selected
     ]
     if dataset_run_rows:
         st.markdown("**Runs on this dataset**")
-        show_table(pd.DataFrame(dataset_run_rows), status=True, height=300, max_rows=100)
+        show_table(
+            pd.DataFrame(dataset_run_rows),
+            status=True,
+            metrics=["train", "test", "gap"],
+            height=300,
+            max_rows=100,
+        )
 
 
 def page_sample_explorer(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]) -> None:
@@ -683,42 +699,42 @@ def method_comparison_table(
     methods: list[dict[str, Any]], run_index: list[dict[str, Any]], dataset: dict[str, Any]
 ) -> None:
     rows = []
-    optional_metrics: set[str] = set()
     for method in methods:
         runs = method_runs(method["method_id"], run_index)
         if not runs:
             continue
         run = runs[0]
         metrics = run.get("metrics", {})
-        counts = metrics.get("status_counts") or run.get("counts", {})
-        metric_name, score = primary_metric(dataset, run)
-        row = {
-            "method": method.get("name", method["method_id"]),
-            "type": method.get("type", ""),
-            "model": method.get("model") or "—",
-            "split": run["split"],
-            "samples": metrics.get("documents", metrics.get("total", 0)),
-            "metric": metric_name,
-            "score": score,
-            "hits": counts.get("hit", 0),
-            "partial": counts.get("partial", 0),
-            "wrong": counts.get("wrong", 0),
-            "missing": counts.get("missing_prediction", 0),
-            "errors": counts.get("error", 0),
-            "description": (method.get("description") or "")[:110],
-        }
-        for key in ("precision", "recall"):
-            value = metrics.get(key)
-            if isinstance(value, (int, float)):
-                row[key] = value
-                optional_metrics.add(key)
-        rows.append(row)
+        counts = (metrics.get("status_counts") or {}).get("test") or run.get("counts", {})
+        train = metric_value(run, "train")
+        test = metric_value(run, "test")
+        gap = metric_value(run, "gap")
+        examples = method.get("examples") or []
+        repair_rounds = method.get("repair_rounds", run.get("repair_rounds", 0))
+        rows.append(
+            {
+                "method": method.get("name", method["method_id"]),
+                "type": method.get("type", ""),
+                "model": method.get("model") or "—",
+                "examples": len(examples),
+                "repair rounds": repair_rounds,
+                "train": train,
+                "test": test,
+                "gap": gap,
+                "hits": counts.get("hit", 0),
+                "partial": counts.get("partial", 0),
+                "wrong": counts.get("wrong", 0),
+                "missing": counts.get("missing_prediction", 0),
+                "errors": counts.get("error", 0),
+                "description": (method.get("description") or "")[:110],
+            }
+        )
 
     st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
     st.subheader("Method comparison")
     st.caption(
-        "Latest run per method for this dataset. Status counts are document-level; "
-        "score is the dataset's primary metric."
+        "Latest run per method for this dataset. Train and test scores use the dataset's "
+        "primary metric; status counts are on test documents."
     )
     if not rows:
         st.info("No methods have run on this dataset yet.")
@@ -727,22 +743,22 @@ def method_comparison_table(
         "method",
         "type",
         "model",
-        "split",
-        "samples",
-        "metric",
-        "score",
+        "examples",
+        "repair rounds",
+        "train",
+        "test",
+        "gap",
         "hits",
         "partial",
         "wrong",
         "missing",
         "errors",
-        *[key for key in ("precision", "recall") if key in optional_metrics],
         "description",
     ]
     frame = pd.DataFrame(rows)[columns]
     show_table(
         frame,
-        metrics=["score", *[key for key in ("precision", "recall") if key in optional_metrics]],
+        metrics=["train", "test", "gap"],
         height=440,
         max_rows=50,
     )
@@ -775,18 +791,82 @@ def render_method_detail(
     run_choice = st.selectbox("Run", [run_label(item) for item in runs])
     run = runs[[run_label(item) for item in runs].index(run_choice)]
     metrics = run.get("metrics", {})
-    stats = st.columns(4)
-    stats[0].metric("Documents", metrics.get("documents", metrics.get("total", 0)))
-    for index, key in enumerate(("accuracy", "f1", "state_accuracy"), start=1):
-        value = metrics.get(key)
-        stats[index].metric(
-            key.replace("_", " ").title(),
-            f"{value:.3f}" if isinstance(value, (int, float)) else "—",
-        )
+    primary = metrics.get("primary") or {}
+    metric_name = primary.get("metric") or primary_metric_name(dataset, run)
+    stats = st.columns(7)
+    stats[0].metric("Train (all)", fmt(primary.get("train")))
+    stats[1].metric("Train (non-example)", fmt(primary.get("train_nonexample")))
+    stats[2].metric("Test", fmt(primary.get("test")))
+    stats[3].metric("Train→test gap", fmt(primary.get("gap")))
+    stats[4].metric("Repair rounds", metrics.get("repair_rounds", 0))
+    stats[5].metric("Test docs", metrics.get("test_documents", "—"))
+    tokens = (metrics.get("token_usage") or {}).get("total_tokens")
+    stats[6].metric("Tokens", f"{tokens:,}" if isinstance(tokens, int) else "—")
     st.caption(
-        f"`{run['run_id']}` · split `{run['split']}` · status `{run['status']}` · "
+        f"`{run['run_id']}` · primary metric `{metric_name}` · split `{run['split']}` · "
+        f"status `{run['status']}` · split policy `{run.get('split_policy_version') or '—'}` · "
         f"method `{run['method_id']}`"
     )
+
+    rounds = run_artifacts.list_rounds(run["run_id"])
+    st.markdown("### Repair rounds")
+    if not rounds:
+        st.caption("No repair rounds: rule-based baseline, or the first script had no failures.")
+    else:
+        round_rows = [
+            {
+                "round": item.get("round"),
+                "kind": item.get("kind"),
+                "train": item.get("train_score"),
+                "non-example": item.get("train_nonexample_score"),
+                "failures": item.get("failure_count"),
+                "crashes": item.get("crash_count"),
+                "validation": "; ".join(item.get("validation_issues") or []) or "—",
+            }
+            for item in rounds
+        ]
+        show_table(
+            pd.DataFrame(round_rows),
+            metrics=["train", "non-example"],
+            height=220,
+            max_rows=10,
+        )
+        choice = st.selectbox(
+            "Inspect repair round",
+            [item.get("round") for item in rounds],
+            format_func=lambda value: next(
+                (
+                    f"round {item.get('round')} ({item.get('kind')}) · "
+                    f"train {fmt(item.get('train_score'))} · "
+                    f"non-example {fmt(item.get('train_nonexample_score'))}"
+                    for item in rounds
+                    if item.get("round") == value
+                ),
+                str(value),
+            ),
+            key=f"repair_round_{run['run_id']}",
+        )
+        round_dir = run_artifacts.RUNS_DIR / run["run_id"] / "rounds" / f"round-{choice}"
+        with st.expander("Round script, feedback and metrics", expanded=False):
+            if (round_dir / "script.py").exists():
+                st.code(
+                    (round_dir / "script.py").read_text(encoding="utf-8"),
+                    language="python",
+                )
+            if (round_dir / "feedback.txt").exists():
+                st.markdown("**Feedback used for this round**")
+                st.code(
+                    (round_dir / "feedback.txt").read_text(encoding="utf-8"),
+                    language="text",
+                )
+            selected_round = next(item for item in rounds if item.get("round") == choice)
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Train metrics (all 50)**")
+                show_json(selected_round.get("train_metrics", {}))
+            with right:
+                st.markdown("**Train metrics (non-example)**")
+                show_json(selected_round.get("train_nonexample_metrics", {}))
 
     records = load_predictions(run["run_id"])
     samples = load_samples(method.get("dataset_id", "")).copy()
@@ -917,11 +997,17 @@ def render_method_detail(
             attempt = st.selectbox("Attempt", [path.name for path in attempts])
             data = json.loads((directory / "attempts" / attempt).read_text(encoding="utf-8"))
             st.caption(
-                f"model `{data.get('model', '—')}` · finish `{data.get('finish_reason', '—')}` "
-                f"· validation issues: {data.get('validation_issues') or 'none'}"
+                f"round `{data.get('round', '—')}` ({data.get('kind', '—')}) · "
+                f"model `{data.get('model', '—')}` · train "
+                f"{fmt(data.get('train_score'))} · non-example "
+                f"{fmt(data.get('train_nonexample_score'))} · validation issues: "
+                f"{data.get('validation_issues') or 'none'}"
             )
-            if data.get("smoke_error"):
-                st.error(data["smoke_error"])
+            if data.get("empty_response"):
+                st.error("The model returned empty content for this attempt.")
+            if data.get("feedback"):
+                st.markdown("**Feedback used for this attempt**")
+                st.code(data["feedback"], language="text", height=240, wrap_lines=True)
             if data.get("code"):
                 st.code(data["code"], language="python")
             with st.expander("Raw response"):
@@ -994,45 +1080,29 @@ def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
     if not run_index:
         st.info("No runs to compare yet.")
         return
-    available = sorted(
-        {
-            key
-            for run in run_index
-            for key in run.get("metrics", {})
-            if key
-            in {
-                "accuracy",
-                "f1",
-                "state_accuracy",
-                "text_f1",
-                "country_accuracy",
-                "macro_f1",
-            }
-        }
-    )
-    metric = st.selectbox("Metric", available)
+    score = st.selectbox("Score", SCORE_SPLITS)
     latest: dict[tuple[str, str], dict[str, Any]] = {}
     for run in run_index:
-        if metric_value(run, metric) is None:
+        if metric_value(run, score) is None:
             continue
         latest.setdefault((run["method_id"], run["dataset_id"]), run)
     rows = [
         {
             "method": method_id,
             "dataset": dataset_id,
-            "metric": metric_value(run, metric),
+            "score": metric_value(run, score),
             "split": run["split"],
         }
         for (method_id, dataset_id), run in latest.items()
     ]
     if not rows:
-        st.info(f"No runs with metric `{metric}`.")
+        st.info(f"No runs with `{score}` scores.")
         return
     table = pd.DataFrame(rows).pivot_table(
-        index="method", columns="dataset", values="metric", aggfunc="last"
+        index="method", columns="dataset", values="score", aggfunc="last"
     )
     st.caption(
-        f"Latest run per method × dataset · metric `{metric}` · green is better, red is worse."
+        f"Latest run per method × dataset · `{score}` score · green is better, red is worse."
     )
     matrix = table.reset_index()
     show_table(

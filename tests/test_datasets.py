@@ -1,5 +1,5 @@
 from llm_script_creation.datasets import (
-    SHARED_TRAIN_GROUPS,
+    SPLIT_POLICY_VERSION,
     TRAIN_SIZE,
     assign_splits,
     dataset_stratum,
@@ -29,7 +29,7 @@ def stratified(samples: list[dict], dataset_id: str) -> list[str]:
 
 def test_v2_split_policy_has_no_dev() -> None:
     assert TRAIN_SIZE == 50
-    assert "dev" not in SHARED_TRAIN_GROUPS
+    assert SPLIT_POLICY_VERSION == "v2-50train"
     labels = {
         dataset_stratum("plan_document_type", {"document_type": "Resolution"}),
         dataset_stratum("plan_year", {"year": 1998}),

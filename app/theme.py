@@ -97,7 +97,6 @@ def _rebuild_semantics() -> None:
             "missing_prediction": PALETTE["orange"],
             "extra": PALETTE["purple"],
             "train": PALETTE["blue"],
-            "dev": PALETTE["yellow"],
             "test": PALETTE["purple"],
             "completed": PALETTE["green"],
             "failed": PALETTE["red"],
