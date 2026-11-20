@@ -544,13 +544,19 @@ First LLM-generated scripts (dev, `qwen2.5-coder:14b` unless noted):
 
 | Dataset | Result |
 |---|---|
-| `plan_year` | accuracy 0.603 (first 4-digit year anywhere; ignores date hints) |
-| `plan_year` (llama3.2:3b) | accuracy 0.610 |
+| `plan_year` / text | accuracy 0.603 (first 4-digit year anywhere; ignores date hints) |
+| `plan_year` / text (llama3.2:3b) | accuracy 0.610 |
+| `plan_year` / segments+position | accuracy 0.926 — but the generated script ignored positions, so this is not evidence that layout caused the gain |
+| `plan_document_code` / text | accuracy 0.713, token F1 0.843 |
 | `upr_state` | 0.000 — generated scripts returned empty or missed the split title line |
-| `upr_recommendations` | P 0.892 / R 0.289 / F1 0.437; country 0.921; exact number 0.983; state 0.000 |
+| `upr_recommendations` / text | P 0.892 / R 0.289 / F1 0.437; country 0.921; exact number 0.983; state 0.000 |
 
 These are **not** tuned final results. They already show the main failure modes:
 
+- A single prompt can produce very different scripts across runs (the segment-aware year
+  script happened to use `match.group()` while the text script used `findall()` with a
+  capturing group), so the position comparison above is confounded until we control for
+  script quality.
 - LLM scripts miss the difference between "first year in the text" and "document year".
 - Plain-text UPR titles can be split across lines (`Report of the Working Group ...` /
   `Review *` / `Albania`); generated scripts assume the state is the immediate next line.
