@@ -499,6 +499,7 @@ uv run inspect-data --db plan
 | Evaluation (Plan fields + UPR recommendations) | `evaluation.py`, `normalization.py` | done |
 | LLM prompt builder + client + sandbox + repair loop | `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` | done |
 | Method/run artifacts | `runs.py`, `artifacts/methods`, `artifacts/runs` | done |
+| Viewer theming | `app/theme.py`, `.streamlit/config.toml` | done |
 
 Commands:
 

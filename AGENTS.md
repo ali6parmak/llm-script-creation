@@ -29,7 +29,8 @@ Uwazi metadata. Read `PLAN.md` first. Generated data reports live in `reports/`.
   - `evaluation.py` — Plan field metrics and UPR recommendation matching.
   - `baselines.py`, `experiments.py` — deterministic baselines and run artifacts.
   - `prompts.py`, `llm.py`, `sandbox.py`, `generate.py` — LLM script pipeline.
-- `app/app.py` — Streamlit viewer for datasets, samples, methods, runs, comparisons.
+- `app/app.py` — Streamlit viewer for datasets, samples, methods, comparisons.
+- `app/theme.py` — palette registry (Gruvbox Dark, Tokyo Night), CSS and status colors.
 - Data dumps: `data/` (gitignored). Generated artifacts: `artifacts/`, `reports/`,
   `results/`, `work/` (all gitignored).
 - Tests: `tests/`.

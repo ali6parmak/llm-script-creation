@@ -22,7 +22,7 @@ uv sync --group dev
 uv run inspect-data                 # reports/data_report.{md,json}
 uv run build-datasets               # snapshot documents + build datasets (~1 min)
 uv run run-baselines --split dev    # deterministic baseline runs
-uv run streamlit run app/app.py     # viewer: datasets, samples, methods, runs, compare
+uv run streamlit run app/app.py     # viewer: datasets, samples, methods, compare
 uv run pytest -q
 uv run ruff check src tests
 ```
@@ -40,6 +40,10 @@ reasoning. Use `--think low|high|max` if you want to test thinking output.
 The prompt, every attempt, the frozen script, predictions, and metrics are written under
 `artifacts/methods/<method_id>/` and `artifacts/runs/<run_id>/`. The viewer picks them up
 automatically.
+
+The viewer has a **Color palette** selector in the sidebar (Gruvbox Dark / Tokyo Night).
+Themes are defined in `app/theme.py`; adding a palette there makes it available in the
+selector without touching the pages.
 
 `just` recipes wrap the common commands: `just sync`, `just build`, `just baselines`,
 `just app`, `just inspect`, `just test`, `just lint`.
@@ -92,6 +96,7 @@ src/llm_script_creation/
   sandbox.py         script validation + subprocess execution
   generate.py        generate → smoke test → repair → evaluate pipeline
 app/app.py           Streamlit viewer
+app/theme.py         theme registry (Gruvbox, Tokyo Night) and semantic colors
 tests/               unit tests (no Mongo required)
 reports/             generated inspection report
 data/                restored Mongo dumps (gitignored)
