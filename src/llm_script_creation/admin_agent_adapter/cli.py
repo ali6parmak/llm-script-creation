@@ -35,6 +35,11 @@ from . import evaluate, prompt, records
 TYPE = "admin_agent_extractor"
 DOCUMENT_TEMPLATE_BY_DB = {"plan": PLAN_DOCUMENT_TEMPLATE, "upr": UPR_DOCUMENT_TEMPLATE}
 
+#: No-title condition. Title is removed from every entity view the extractor
+#: sees: AgentEntity.title, raw entities, query summaries and ctx["title"].
+#: A titled (or hybrid) variant can be added later as a separate method.
+TITLE_VISIBLE = False
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -105,7 +110,7 @@ def _record(conn: Any, dataset: dict[str, Any], sample: dict[str, Any], template
         "doc_id": doc_row["doc_id"],
         "shared_id": doc_row["doc_id"],
         "split": sample["split"],
-        "title": doc_row.get("title") or "",
+        "title": (doc_row.get("title") or "") if TITLE_VISIBLE else "",
         "template_id": dataset["template"],
         "template_name": template["name"],
         "language": doc_row.get("language") or "en",
@@ -131,9 +136,30 @@ def _allowed_values(property_type: str, train_records: list[dict[str, Any]], fie
     return sorted(values)
 
 
-def _write_execute_sample(handle: Any, record: dict[str, Any]) -> None:
+def _target_properties(dataset_id: str, field: str) -> set[str]:
+    """Metadata properties that must be absent when the extractor RUNS.
+
+    The value being extracted is empty in production, so leaving the gold in
+    ``ctx.metadata`` would be a trivial shortcut. UPR targets are relationship
+    properties with different names from our benchmark field.
+    """
+    return {
+        "upr_state": {"state_reviewed"},
+        "upr_recommendations": {"related_recommendations", "state_reviewed"},
+    }.get(dataset_id, {field})
+
+
+def _write_execute_sample(
+    handle: Any, record: dict[str, Any], redact_properties: set[str] | None = None
+) -> None:
     """Write one payload line (everything except our gold wrapper)."""
     payload = {key: value for key, value in record.items() if key != "gold"}
+    if redact_properties:
+        payload["metadata"] = {
+            key: value
+            for key, value in (payload.get("metadata") or {}).items()
+            if key not in redact_properties
+        }
     handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
@@ -259,6 +285,7 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     directory = WORK_DIR / "admin_agent" / f"{stamp}_{runs.slug(dataset_id)}"
     directory.mkdir(parents=True, exist_ok=True)
 
+    redact_properties = _target_properties(dataset_id, field)
     task_prompt = prompt.build_author_task(
         dataset_id=dataset_id,
         property_name=field,
@@ -266,6 +293,8 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         template_name=template["name"],
         train_total=len(train_records),
         allowed_values=_allowed_values(property_type, train_records, field),
+        title_visible=TITLE_VISIBLE,
+        target_metadata_hidden=True,
     )
     author_request = {
         "mode": "author",
@@ -308,12 +337,12 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     try:
         with execute_path.open("w", encoding="utf-8") as handle:
             for record in train_records:
-                _write_execute_sample(handle, record)
+                _write_execute_sample(handle, record, redact_properties)
             for row in test_rows:
                 record = _record(exec_conn, dataset, row, template)
                 if record is None:
                     continue
-                _write_execute_sample(handle, record)
+                _write_execute_sample(handle, record, redact_properties)
                 expected[record["doc_id"]] = record["gold"]
                 sample_meta.append(
                     {"doc_id": record["doc_id"], "split": "test", "gold": record["gold"]}
@@ -361,7 +390,8 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         "tool_calls": author.get("tool_calls"),
     }
     metrics["method_notes"] = (
-        "Production-context condition: the extractor sees title and metadata. "
+        "No-title condition: ctx['title'] and entity titles are empty; other metadata is "
+        "visible. The target property is removed from ctx.metadata at execution time. "
         "Authored on train documents only; executed once on the untouched test split."
     )
 
@@ -370,10 +400,12 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
     prompt_slug = runs.slug(prompt.PROMPT_VERSION).removeprefix("admin_agent_")
     method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}"
     config = {
-        "condition": "production_context",
+        "condition": "no_title",
         "prompt_version": prompt.PROMPT_VERSION,
-        "title_visible": True,
+        "title_visible": TITLE_VISIBLE,
         "metadata_visible": True,
+        "target_property_visible_at_execution": False,
+        "target_properties_redacted": sorted(redact_properties),
         "source": "primary-document segmentation",
         "template_name": template["name"],
         "template_id": dataset["template"],
@@ -393,8 +425,9 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         name=f"Admin agent extractor — {dataset_id} ({prompt.PROMPT_VERSION})",
         description=(
             "The real Uwazi admin agent's nested extractor subagent authors `def extract(text, ctx)` "
-            "from primary-document segmentation on the train split (title and metadata visible = "
-            "production context), then the frozen function runs once over train and test. Scored "
+            "from primary-document segmentation on the train split (NO-TITLE condition: entity "
+            "titles are hidden, other metadata visible, and the target property is removed from "
+            "ctx.metadata at execution). The frozen function runs once over train and test, scored "
             "against real Uwazi metadata with our Plan evaluator."
         ),
         dataset_id=dataset_id,

@@ -19,7 +19,7 @@ from collections.abc import Iterable
 
 #: Version of the authoring task contract. Bumped when the task text changes so
 #: method artifacts from different prompt variants stay distinguishable.
-PROMPT_VERSION = "admin-agent-v2-no-ids"
+PROMPT_VERSION = "admin-agent-v3-no-title"
 
 _VALUE_SHAPES = {
     "numeric": "an int, e.g. 2019 (not a string)",
@@ -50,13 +50,45 @@ def build_author_task(
     allowed_values: Iterable[str] | None = None,
     language: str = "en",
     source_label: str = "primary-document segmentation",
+    title_visible: bool = False,
+    target_metadata_hidden: bool = True,
 ) -> str:
     """Build the precise authoring task for one property.
 
     Only a COUNT of train documents is disclosed; the extractor discovers the
     documents itself. No test document is ever in the authoring request.
+
+    ``title_visible=False`` is the no-title condition: ``ctx["title"]`` is empty
+    and entity summaries carry no titles. ``target_metadata_hidden=True`` tells
+    the extractor that the target property is removed from ``ctx.metadata`` at
+    execution time (train rows may still carry it because they are labeled).
     """
     value_shape = _VALUE_SHAPES.get(property_type, "a JSON-serializable value")
+    ctx_title = "str" if title_visible else '"" (hidden)'
+    if title_visible:
+        title_block = (
+            "- Title is VISIBLE: `ctx['title']` carries the entity title. Metadata is\n"
+            "  visible too, so a title/metadata shortcut is possible; prefer reading the\n"
+            "  document when the value is stated there."
+        )
+    else:
+        title_block = (
+            "- Title is HIDDEN in this condition: `ctx['title']` is always the empty\n"
+            "  string, and `query_entities` summaries/examples carry no titles."
+        )
+    if target_metadata_hidden:
+        target_block = (
+            f"- The target property `{property_name}` is REMOVED from `ctx['metadata']`\n"
+            "  when the extractor runs (production-realistic: the value being extracted is\n"
+            "  empty). Train rows may still carry it because they are already labeled, but\n"
+            "  a rule that reads the target from `ctx['metadata']` will return nothing on\n"
+            "  the real run. Read the document text instead."
+        )
+    else:
+        target_block = (
+            f"- Metadata is visible, including the target property `{property_name}` on\n"
+            "  labeled train rows. A metadata shortcut is possible; prefer document text."
+        )
     allowed_block = ""
     if allowed_values:
         allowed_block = (
@@ -86,10 +118,11 @@ SOURCE: {source_label}
   `"\\n".join(p["text"] for p in seg["paragraphs"])`: page-ordered paragraph
   text, one paragraph per line. There are no page markers or separators.
 - `ctx` is EXACTLY:
-      {{"shared_id": str, "title": str, "metadata": {{property: [values]}}}}
+      {{"shared_id": str, "title": {ctx_title}, "metadata": {{property: [values]}}}}
   `metadata` is Uwazi's read shape: each property is a list of entries such as
-  {{"value": ..., "label": ...}}. Title and metadata are visible on purpose
-  (the production-context condition). Do not assume the value appears in them.
+  {{"value": ..., "label": ...}}.
+{title_block}
+{target_block}
 - Do NOT look for HTML supporting files or call `peek_file_text`: these
   entities have no HTML file. Sample their primary-document text with
   `peek_segmentation_by_entity(shared_id, "{language}")`.

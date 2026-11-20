@@ -40,8 +40,10 @@ script for our prompt, we run the **real Uwazi admin agent's nested extractor su
 (`uwazi_admin_agent.use_cases.author_extractor_tool.build_extractor_agent`) over our Plan
 data, then execute the returned `def extract(text, ctx)` with the admin agent's own sandbox.
 
-Phase 1 uses the admin agent as-is (its model, its prompt, its tools). Title and Uwazi
-metadata stay visible: that is the **production-context** condition. The extractor is
+Phase 1 uses the admin agent as-is (its model, its prompt, its tools). The default condition
+is **no title**: entity titles and `ctx["title"]` are empty, other Uwazi metadata stays
+visible, and the target property is removed from `ctx.metadata` at execution time so a
+metadata shortcut cannot score. (Earlier v1/v2 runs had the title visible.) The extractor is
 authored from the train split only; the untouched test split is used for one final execution.
 The benchmark task prompt deliberately does **not** inject a list of train shared_ids: the
 extractor discovers its own samples via `query_entities`, as it does in the real admin

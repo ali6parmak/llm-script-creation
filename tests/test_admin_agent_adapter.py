@@ -89,12 +89,30 @@ def test_prompt_states_source_output_and_train_only() -> None:
     assert 'Return `{"year": <value>}`' in task
     assert "Return `None`" in task
     assert '`"\\n".join(p["text"] for p in seg["paragraphs"])`' in task
-    assert '{"shared_id": str, "title": str, "metadata": {property: [values]}}' in task
+    assert '{"shared_id": str, "title": "" (hidden), "metadata": {property: [values]}}' in task
+    assert "Title is HIDDEN" in task
+    assert "target property `year` is REMOVED" in task
     assert "peek_segmentation_by_entity" in task
     # No injected sample list: the extractor discovers entities itself.
     assert "Candidate train shared_ids" not in task
     assert "by_ids" not in task
     assert "test" not in task.lower().replace("latest", "")
+
+
+def test_prompt_title_visible_variant() -> None:
+    task = prompt.build_author_task(
+        dataset_id="plan_year",
+        property_name="year",
+        property_type="numeric",
+        template_name="Document",
+        train_total=2,
+        title_visible=True,
+        target_metadata_hidden=False,
+    )
+
+    assert '{"shared_id": str, "title": str, "metadata": {property: [values]}}' in task
+    assert "Title is VISIBLE" in task
+    assert "Metadata is visible, including the target property" in task
 
 
 def test_prompt_lists_allowed_select_values() -> None:

@@ -605,8 +605,12 @@ data, then execute the returned `def extract(text, ctx)` with the admin agent's 
 
 What is held fixed:
 
-- **Condition:** production context — title and Uwazi metadata remain visible. A strict
-  no-title condition is a later experiment.
+- **Condition (default, v3):** no title — `ctx["title"]` and every entity title are empty,
+  while other Uwazi metadata remains visible. The target property is removed from
+  `ctx.metadata` at execution time (production-realistic: the value being extracted is
+  empty), so a metadata shortcut cannot score. Train rows still carry the target during
+  authoring because they are the admin agent's labeled samples; the task tells the extractor
+  not to read it. Historical v1/v2 runs had the title visible.
 - **Source:** the primary-document segmentation, with exactly the admin agent's
   document-extraction input: `"\n".join(p["text"] for p in seg["paragraphs"])` (catalog
   segments are already page/reading ordered). `ctx` is the admin agent's own
@@ -701,6 +705,24 @@ reader; its lower train score and extra 55 missing predictions also show it is n
 "better". Removing the ids was still the right call, but it cannot be evaluated in isolation
 while the title is visible. The **no-title condition is now the necessary next experiment**,
 not an optional one.
+
+**No-title condition (v3).** `prompt.PROMPT_VERSION = "admin-agent-v3-no-title"` hides the
+title from `AgentEntity`, raw entities, query summaries and `ctx`, and removes the target
+property from `ctx.metadata` in the execution payload. Re-running `plan_year`:
+
+| `plan_year` prompt | Train | Test | Test hit / wrong / missing | Coverage | Author requests | Tokens |
+|---|---:|---:|---|---:|---:|---:|
+| v1 (title visible, ids) | 0.960 | 0.934 | 9,304 / 628 / 33 | 99.7% | 14 | 1,089,919 |
+| v2 (title visible, no ids) | 0.900 | 0.939 | 9,360 / 517 / 88 | 99.1% | 18 | 1,907,173 |
+| v3 (no title) | 0.920 | 0.932 | 9,288 / 675 / 2 | 99.98% | 12 | 734,535 |
+
+The v3 extractor is a clean, simple rule: **first plausible four-digit year in the document
+text**, with a `dateparse` fallback on the first 2,000 characters. It never reads `ctx`.
+That is effectively the regex baseline (0.932 test), so under the no-title condition the
+admin agent's strategy is **baseline-level on `plan_year`**, not the metadata-aware
+compilation strategy of v1. The title was doing the work in v2; without it, the agent
+converges to the obvious heuristic. Coverage is 99.98% (only 2 missing), so the remaining
+error is wrong-year choice, not abstention.
 
 **Two scoring views.** Our evaluator normalizes document codes (case/punctuation/spacing), so
 a prediction `A/RES/64/74` matches gold `A/RES/64/74*`. The admin agent's own
