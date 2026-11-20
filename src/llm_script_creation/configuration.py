@@ -27,6 +27,9 @@ DATA_DIR = Path(os.getenv("DATA_DIR", PROJECT_ROOT / "data"))
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", PROJECT_ROOT / "reports"))
 RESULTS_DIR = Path(os.getenv("RESULTS_DIR", PROJECT_ROOT / "results"))
 WORK_DIR = Path(os.getenv("WORK_DIR", PROJECT_ROOT / "work"))
+ARTIFACTS_DIR = Path(os.getenv("ARTIFACTS_DIR", PROJECT_ROOT / "artifacts"))
+DATASETS_DIR = ARTIFACTS_DIR / "datasets"
+CATALOG_PATH = ARTIFACTS_DIR / "catalog.db"
 
-for _directory in (REPORTS_DIR, RESULTS_DIR, WORK_DIR):
+for _directory in (REPORTS_DIR, RESULTS_DIR, WORK_DIR, ARTIFACTS_DIR):
     _directory.mkdir(parents=True, exist_ok=True)
