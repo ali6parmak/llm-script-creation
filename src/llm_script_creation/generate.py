@@ -304,6 +304,7 @@ def generate(
     temperature: float = 0.0,
     model: str = MODEL,
     max_tokens: int = 8192,
+    think: bool | str | None = False,
     method_name: str | None = None,
     method_description: str | None = None,
     dry_run: bool = False,
@@ -357,7 +358,11 @@ def generate(
         for attempt in range(1, max_attempts + 1):
             print(f"Generation attempt {attempt}/{max_attempts}…", flush=True)
             response = llm.chat(
-                history, model=model, temperature=temperature, max_tokens=max_tokens
+                history,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                think=think,
             )
             response_model = response.model
             for key, value in response.usage.items():
@@ -443,6 +448,7 @@ def generate(
                 "temperature": temperature,
                 "max_attempts": max_attempts,
                 "max_tokens": max_tokens,
+                "think": think,
                 "split": split,
                 "limit": limit,
             },
@@ -512,6 +518,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument(
+        "--think",
+        default="off",
+        choices=["off", "low", "high", "max"],
+        help="thinking level; 'off' sets think=false (required for cloud reasoning models)",
+    )
     parser.add_argument("--method-name", default=None)
     parser.add_argument("--method-description", default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -528,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         temperature=args.temperature,
         model=args.model,
         max_tokens=args.max_tokens,
+        think=False if args.think == "off" else args.think,
         method_name=args.method_name,
         method_description=args.method_description,
         dry_run=args.dry_run,

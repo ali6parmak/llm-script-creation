@@ -19,6 +19,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 # place to change the model used to synthesise extraction scripts.
 MODEL = os.getenv("MODEL", "deepseek-v4.1-flash:cloud")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+OLLAMA_NATIVE_BASE = OLLAMA_BASE_URL[:-3] if OLLAMA_BASE_URL.endswith("/v1") else OLLAMA_BASE_URL
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 
 # --- Storage ---------------------------------------------------------------
