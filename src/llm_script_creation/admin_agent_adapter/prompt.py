@@ -20,6 +20,7 @@ from collections.abc import Iterable
 #: Version of the authoring task contract. Bumped when the task text changes so
 #: method artifacts from different prompt variants stay distinguishable.
 PROMPT_VERSION = "admin-agent-v3-no-title"
+PROMPT_VERSION_GEOMETRY = "admin-agent-v3-no-title-geometry"
 
 _VALUE_SHAPES = {
     "numeric": "an int, e.g. 2019 (not a string)",
@@ -55,6 +56,8 @@ def build_author_task(
     value_shape: str | None = None,
     task_hint: str | None = None,
     candidate_block_title: str = "ALLOWED VALUES (the property is a select thesaurus; use the label verbatim)",
+    geometry: bool = False,
+    metadata_visible: bool = True,
 ) -> str:
     """Build the precise authoring task for one property.
 
@@ -68,6 +71,19 @@ def build_author_task(
     """
     value_shape = value_shape or _VALUE_SHAPES.get(property_type, "a JSON-serializable value")
     hint_block = f"\n- Task hint: {task_hint}" if task_hint else ""
+    if geometry:
+        format_block = (
+            "- This is the GEOMETRY condition. Every line is `<prefix>text`, where the prefix is\n"
+            "  `[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT]` with integer PDF coordinates and the original\n"
+            "  paragraph text follows after one space. The prefix is metadata: strip it before\n"
+            "  returning any text value. You may use page/x/y/size to identify headers, footers,\n"
+            "  columns, and reading order."
+        )
+    else:
+        format_block = (
+            "- There are no page markers, coordinate prefixes, or separators: the line is just the\n"
+            "  paragraph text."
+        )
     ctx_title = "str" if title_visible else '"" (hidden)'
     if title_visible:
         title_block = (
@@ -80,7 +96,12 @@ def build_author_task(
             "- Title is HIDDEN in this condition: `ctx['title']` is always the empty\n"
             "  string, and `query_entities` summaries/examples carry no titles."
         )
-    if target_metadata_hidden:
+    if not metadata_visible:
+        target_block = (
+            "- At execution, `ctx['metadata']` is EMPTY. Do not read any metadata\n"
+            "  (the target, the title, or any other property); use the document text."
+        )
+    elif target_metadata_hidden:
         target_block = (
             f"- The target property `{property_name}` is REMOVED from `ctx['metadata']`\n"
             "  when the extractor runs (production-realistic: the value being extracted is\n"
@@ -117,7 +138,8 @@ OUTPUT CONTRACT (unchanged from your system prompt)
 SOURCE: {source_label}
 - These entities' primary document is a PDF. The `text` argument is EXACTLY
   `"\\n".join(p["text"] for p in seg["paragraphs"])`: page-ordered paragraph
-  text, one paragraph per line. There are no page markers or separators.
+  text, one paragraph per line.
+{format_block}
 - `ctx` is EXACTLY:
       {{"shared_id": str, "title": {ctx_title}, "metadata": {{property: [values]}}}}
   `metadata` is Uwazi's read shape: each property is a list of entries such as
@@ -146,6 +168,7 @@ Return the function plus honest samples_total / samples_matched counts.
 
 PROMPT_VERSION_RECOMMENDATIONS = "admin-agent-v3-records-no-title"
 PROMPT_VERSION_RECOMMENDATIONS_NO_LIST = "admin-agent-v3-records-no-title-no-list"
+PROMPT_VERSION_RECOMMENDATIONS_GEOMETRY = "admin-agent-v3-records-no-title-geometry"
 
 
 def build_recommendations_task(
@@ -158,6 +181,8 @@ def build_recommendations_task(
     title_visible: bool = False,
     target_metadata_hidden: bool = True,
     include_state_list: bool = True,
+    geometry: bool = False,
+    metadata_visible: bool = True,
 ) -> str:
     """Authoring task for UPR recommendation record extraction.
 
@@ -173,13 +198,31 @@ def build_recommendations_task(
         if not title_visible
         else "- Title is VISIBLE: `ctx['title']` carries the entity title."
     )
-    target_block = (
-        "- The properties `state_reviewed` and `related_recommendations` are REMOVED from\n"
-        "  `ctx['metadata']` when the extractor runs. Train rows may still carry them, but\n"
-        "  do not read the answer from metadata; read the document text."
-        if target_metadata_hidden
-        else "- Metadata, including the linked recommendation ids, is visible."
-    )
+    if not metadata_visible:
+        target_block = (
+            "- At execution, `ctx['metadata']` is EMPTY. Do not read any metadata; use the\n"
+            "  document text."
+        )
+    elif target_metadata_hidden:
+        target_block = (
+            "- The properties `state_reviewed` and `related_recommendations` are REMOVED from\n"
+            "  `ctx['metadata']` when the extractor runs. Train rows may still carry them, but\n"
+            "  do not read the answer from metadata; read the document text."
+        )
+    else:
+        target_block = "- Metadata, including the linked recommendation ids, is visible."
+    if geometry:
+        format_block = (
+            "- This is the GEOMETRY condition. Every line is `<prefix>text`, where the prefix is\n"
+            "  `[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT]` with integer PDF coordinates and the original\n"
+            "  paragraph text follows after one space. Strip the prefix before returning any\n"
+            "  `text` field; use page/x/y to skip page furniture and merge cross-page continuations."
+        )
+    else:
+        format_block = (
+            "- There are no page markers, coordinate prefixes, or separators: the line is just the\n"
+            "  paragraph text."
+        )
     if include_state_list:
         countries_instruction = (
             "- `countries`: recommending-state labels verbatim from the candidate list. Use []\n"
@@ -233,7 +276,8 @@ OUTPUT CONTRACT (still the extractor signature from your system prompt)
 SOURCE: primary-document segmentation
 - These entities' primary document is a PDF. The `text` argument is EXACTLY
   `"\\n".join(p["text"] for p in seg["paragraphs"])`: page-ordered paragraph text,
-  one paragraph per line. There are no page markers or separators.
+  one paragraph per line.
+{format_block}
 - `ctx` is EXACTLY:
       {{"shared_id": str, "title": "", "metadata": {{property: [values]}}}}
 - Do NOT look for HTML supporting files or call `peek_file_text`; sample the

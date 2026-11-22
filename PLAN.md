@@ -813,13 +813,37 @@ accuracy improves by 2.6 points. It is also cheaper (6 vs 14 author requests), b
 agent does not have to rediscover the label universe. This is a clear win for passing the
 Uwazi country list, and the main TASKS experimental factor we can answer with confidence.
 
-Positions/sizes were not provided to either extractor; that TASKS factor is still untested
-here (our own pipeline's segments+position variant remains the evidence for it).
+**Position/size A/B (geometry condition).** `--geometry` prefixes every paragraph with
+`[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT]` (integer PDF coordinates); the task explains the
+prefix and tells the extractor to strip it before returning text. Results:
+
+| Run | Train | Test | Request / tokens |
+|---|---:|---:|---:|
+| `plan_year` text, metadata visible | 0.920 | 0.932 | 12 / 734,535 |
+| `plan_year` geometry, metadata visible | 0.980 | 0.943 | 16 / 1,500,463 |
+| `plan_year` text, **no metadata** | 0.940 | 0.933 | 10 / 600,606 |
+| `plan_year` geometry, **no metadata** | 0.900 | 0.926 | 12 / 771,376 |
+| UPR recs text | 0.995 | 0.979 | 6 / 545,166 |
+| UPR recs geometry | 0.995 | 0.978 | 18 / 3,215,315 |
+
+The first geometry run's +0.011 looked like a position effect, but its extractor's first
+rule read `topics_in_related_paragraphs` metadata labels (which contain years), so the gain
+was a **metadata shortcut**, not geometry. The clean `--no-metadata` A/B is 0.933 text vs
+0.926 geometry. The geometry extractor strips the prefixes but does not use the coordinates
+for any decision; it just adds parsing work. UPR recommendations are effectively unchanged
+(0.979 → 0.978) at 3× the requests and tokens; that extractor also strips the prefixes
+without using positions.
+
+**Conclusion for TASKS:** positions/sizes do **not** improve the admin extractor on these
+tasks. The earlier segments+position gain belongs to our own script pipeline (a different
+method), not to the admin agent. Also note the metadata leak: `topics_in_related_paragraphs`
+labels contain years, so `--no-metadata` is the clean text-only condition.
 
 **Status:** the no-title v3 adapter covers all eight single Plan fields with gold, UPR state,
-and UPR recommendation records. The country-list A/B is done (the list clearly helps).
-Remaining TASKS factors: position/size input and prompt variants. The full
-`GenerateScriptUseCase` bulk-script path remains out of scope.
+and UPR recommendation records. The country-list A/B is done (the list clearly helps) and
+the position/size A/B is done (no gain for the admin extractor). Remaining TASKS factor:
+controlled prompt variants with repeated runs. The full `GenerateScriptUseCase` bulk-script
+path remains out of scope.
 
 ### What the v2 numbers show
 

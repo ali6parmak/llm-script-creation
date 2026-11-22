@@ -177,11 +177,16 @@ def _target_properties(dataset_id: str, field: str) -> set[str]:
 
 
 def _write_execute_sample(
-    handle: Any, record: dict[str, Any], redact_properties: set[str] | None = None
+    handle: Any,
+    record: dict[str, Any],
+    redact_properties: set[str] | None = None,
+    drop_metadata: bool = False,
 ) -> None:
     """Write one payload line (everything except our gold wrapper)."""
     payload = {key: value for key, value in record.items() if key != "gold"}
-    if redact_properties:
+    if drop_metadata:
+        payload["metadata"] = {}
+    elif redact_properties:
         payload["metadata"] = {
             key: value
             for key, value in (payload.get("metadata") or {}).items()
@@ -289,7 +294,11 @@ def run(
     limit_train: int | None,
     limit_test: int | None,
     include_country_list: bool = True,
+    geometry: bool = False,
+    no_metadata: bool = False,
 ) -> dict[str, Any]:
+    if geometry and not include_country_list:
+        raise SystemExit("--geometry with --no-country-list is not a supported combination.")
     conn = catalog.connect()
     try:
         dataset = _load_dataset(conn, dataset_id)
@@ -315,6 +324,8 @@ def run(
         train_rows = _rows(conn, dataset_id, "train", limit_train)
         test_rows = _rows(conn, dataset_id, "test", limit_test)
         train_records = [r for r in (_record(conn, dataset, row, template) for row in train_rows) if r]
+        if geometry:
+            train_records = [records.with_geometry(record) for record in train_records]
         if not train_records:
             raise SystemExit("No train documents with segmentation found.")
         if not test_rows:
@@ -333,6 +344,10 @@ def run(
             if include_country_list
             else prompt.PROMPT_VERSION_RECOMMENDATIONS_NO_LIST
         )
+        if geometry:
+            prompt_version += "-geometry"
+        if no_metadata:
+            prompt_version += "-no-metadata"
         task_prompt = prompt.build_recommendations_task(
             dataset_id=dataset_id,
             template_name=template["name"],
@@ -341,9 +356,15 @@ def run(
             title_visible=TITLE_VISIBLE,
             target_metadata_hidden=True,
             include_state_list=include_country_list,
+            geometry=geometry,
+            metadata_visible=not no_metadata,
         )
     else:
         prompt_version = prompt.PROMPT_VERSION
+        if geometry:
+            prompt_version += "-geometry"
+        if no_metadata:
+            prompt_version += "-no-metadata"
         task_prompt = prompt.build_author_task(
             dataset_id=dataset_id,
             property_name=property_name,
@@ -353,6 +374,8 @@ def run(
             allowed_values=_candidate_values(dataset_id, property_type, train_records, field),
             title_visible=TITLE_VISIBLE,
             target_metadata_hidden=True,
+            geometry=geometry,
+            metadata_visible=not no_metadata,
             **_prompt_extras(dataset_id),
         )
     author_request = {
@@ -396,12 +419,14 @@ def run(
     try:
         with execute_path.open("w", encoding="utf-8") as handle:
             for record in train_records:
-                _write_execute_sample(handle, record, redact_properties)
+                _write_execute_sample(handle, record, redact_properties, drop_metadata=no_metadata)
             for row in test_rows:
                 record = _record(exec_conn, dataset, row, template)
                 if record is None:
                     continue
-                _write_execute_sample(handle, record, redact_properties)
+                if geometry:
+                    record = records.with_geometry(record)
+                _write_execute_sample(handle, record, redact_properties, drop_metadata=no_metadata)
                 expected[record["doc_id"]] = record["gold"]
                 sample_meta.append(
                     {"doc_id": record["doc_id"], "split": "test", "gold": record["gold"]}
@@ -454,8 +479,9 @@ def run(
         "tool_calls": author.get("tool_calls"),
     }
     metrics["method_notes"] = (
-        "No-title condition: ctx['title'] and entity titles are empty; other metadata is "
-        "visible. The target property is removed from ctx.metadata at execution time. "
+        "No-title condition: ctx['title'] and entity titles are empty; "
+        + ("metadata is also EMPTY at execution" if no_metadata else "other metadata is visible")
+        + ". The target property is removed from ctx.metadata at execution time. "
         "Authored on train documents only; executed once on the untouched test split."
     )
 
@@ -467,7 +493,6 @@ def run(
         "condition": "no_title",
         "prompt_version": prompt_version,
         "title_visible": TITLE_VISIBLE,
-        "metadata_visible": True,
         "target_property_visible_at_execution": False,
         "target_properties_redacted": sorted(redact_properties),
         "source": "primary-document segmentation",
@@ -482,6 +507,10 @@ def run(
             if include_country_list
             else 0
         ),
+        "geometry": geometry,
+        "no_metadata": no_metadata,
+        "metadata_visible": not no_metadata,
+        "input_representation": "text+geometry" if geometry else "text",
         "admin_agent_model": author.get("model"),
         "admin_agent_base_url": author.get("base_url"),
         "max_requests": author_request["max_requests"],
@@ -515,6 +544,11 @@ def run(
         created_at=now,
         prompt_version=prompt_version,
     )
+    method["input_spec"] = {
+        "representation": "text",
+        "source": "primary-document segmentation",
+        "geometry": geometry,
+    }
     attempt = {
         "round": 1,
         "kind": "admin_agent_author",
@@ -578,6 +612,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="UPR recommendations only: do not put the 195 candidate State labels in the task.",
     )
+    parser.add_argument(
+        "--geometry",
+        action="store_true",
+        help="Prefix every paragraph with [pPAGE x=… y=… w=… h=…] (position/size condition).",
+    )
+    parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Drop ctx.metadata entirely at execution time (clean text-only condition).",
+    )
     args = parser.parse_args(argv)
 
     if not CATALOG_PATH.exists():
@@ -588,6 +632,8 @@ def main(argv: list[str] | None = None) -> int:
         args.limit_train,
         args.limit_test,
         include_country_list=not args.no_country_list,
+        geometry=args.geometry,
+        no_metadata=args.no_metadata,
     )
     print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
     return 0

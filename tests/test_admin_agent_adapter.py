@@ -273,3 +273,49 @@ def test_recommendations_task_no_country_list_variant() -> None:
     assert "France" not in task
     assert "NO CANDIDATE STATE LIST IS PROVIDED" in task
     assert prompt.PROMPT_VERSION_RECOMMENDATIONS_NO_LIST != prompt.PROMPT_VERSION_RECOMMENDATIONS
+
+
+def test_geometry_prefixes_paragraphs() -> None:
+    record = {
+        "shared_id": "abc",
+        "segments": [
+            {"text": "hello", "page": 2, "left": 10.4, "top": 20.6, "width": 100.0, "height": 9.0}
+        ],
+    }
+
+    transformed = records.with_geometry(record)
+    text = transformed["segments"][0]["text"]
+
+    assert text == "[p2 x=10 y=21 w=100 h=9] hello"
+    assert record["segments"][0]["text"] == "hello"  # input not mutated
+
+
+def test_geometry_prompt_describes_prefix() -> None:
+    task = prompt.build_author_task(
+        dataset_id="plan_year",
+        property_name="year",
+        property_type="numeric",
+        template_name="Document",
+        train_total=50,
+        geometry=True,
+    )
+
+    assert "GEOMETRY condition" in task
+    assert "[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT]" in task
+    assert "The prefix is metadata" in task
+    assert "returning any text value" in task
+
+
+def test_no_metadata_prompt_condition() -> None:
+    task = prompt.build_author_task(
+        dataset_id="plan_year",
+        property_name="year",
+        property_type="numeric",
+        template_name="Document",
+        train_total=50,
+        metadata_visible=False,
+    )
+
+    assert "`ctx['metadata']` is EMPTY" in task
+    assert "Do not read any metadata" in task
+    assert "target property `year` is REMOVED" not in task

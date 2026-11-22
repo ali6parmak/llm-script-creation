@@ -73,7 +73,10 @@ uv run benchmark-admin-agent --dataset upr_recommendations
 list of `{number, text, countries}` records plus the state, which our existing UPR evaluator
 scores. The full create-and-link path remains out of scope. Add `--no-country-list` to omit
 the 195 candidate State labels; on the full run that drops test F1 from 0.979 to 0.939, so
-the list is a real win.
+the list is a real win. Add `--geometry` to prefix every paragraph with
+`[pPAGE x=… y=… w=… h=…]`; in the A/B it did not improve the admin extractor (plan year
+0.933 text vs 0.926 geometry; UPR recs 0.979 vs 0.978). Add `--no-metadata` for a clean
+text-only execution condition (the target and all other metadata are absent).
 
 The admin repo's `.venv` currently predates two dependencies declared in its `pyproject.toml`
 (`rapidfuzz`, `python-dateutil`). Rather than modify that read-only repo, the sidecar layers

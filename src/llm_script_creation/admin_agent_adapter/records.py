@@ -91,6 +91,26 @@ def joined_paragraph_text(paragraphs: list[dict[str, Any]]) -> str:
     return "\n".join(str(paragraph.get("text", "")) for paragraph in paragraphs)
 
 
+def with_geometry(record: dict[str, Any]) -> dict[str, Any]:
+    """Prefix each paragraph with its PDF geometry (the GEOMETRY condition).
+
+    The prefix is part of the paragraph text, so both the authoring peek tools
+    and the execution-time join see it. Format:
+    ``[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT] text`` with integer coordinates.
+    """
+    segments = []
+    for segment in record.get("segments") or []:
+        page = segment.get("page_number", segment.get("page", 0)) or 0
+        prefix = (
+            f"[p{int(page)} x={int(round(float(segment.get('left', 0) or 0)))} "
+            f"y={int(round(float(segment.get('top', 0) or 0)))} "
+            f"w={int(round(float(segment.get('width', 0) or 0)))} "
+            f"h={int(round(float(segment.get('height', 0) or 0)))}] "
+        )
+        segments.append({**segment, "text": prefix + str(segment.get("text", ""))})
+    return {**record, "segments": segments}
+
+
 def context_from_record(record: dict[str, Any]) -> dict[str, Any]:
     """``ctx`` exactly as the admin agent's ``build_context`` builds it (pure)."""
     return {
@@ -226,5 +246,6 @@ __all__ = [
     "raw_entity_from_record",
     "read_json",
     "segmentation_from_record",
+    "with_geometry",
     "write_json",
 ]
