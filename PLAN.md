@@ -797,16 +797,29 @@ script pipeline** (`0.945` test with segments+position) and the deterministic ba
 **state-only** (98.2%); it is not a recommendation score and should not be compared with the
 F1 above.
 
-The result says the admin agent's text-only record parser plus the candidate-country list is
-strong on this task. It does not yet tell us whether the country list is necessary: the
-function embeds the list, so a no-list A/B is the next experiment. Positions/sizes were not
-provided to this extractor; that TASKS factor is still untested here (our own pipeline's
-segments+position variant remains the evidence for it).
+**Country-list A/B (the TASKS "pass the list of countries" question).** Both runs use the
+same dataset, model, no-title condition and train/test split; the only change is whether the
+task includes the 195 Uwazi State labels (`--no-country-list` removes them). The no-list
+extractor produced a small hand-written printed→Uwazi map (Congo, Syrian Arab Republic,
+Micronesia, …) instead of the full list.
 
-**Status:** the no-title v3 adapter now covers all eight single Plan fields with gold, UPR
-state, and UPR recommendation records. Remaining TASKS factors: a no-country-list A/B,
-position/size input, and prompt variants. The full `GenerateScriptUseCase` bulk-script path
-remains out of scope.
+| UPR recommendations | P | R | F1 | Text F1 | Country | Number | State | Statuses | Requests | Tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| with 195 labels | 0.978 | 0.980 | **0.979** | 0.9995 | 0.982 | 0.991 | 0.991 | 111 hit · 3 partial | 6 | 545,166 |
+| no list | 0.975 | 0.906 | 0.939 | 0.9997 | 0.956 | 0.986 | 0.904 | 89 hit · 25 partial | 14 | 1,699,722 |
+
+The list is worth **+0.040 F1**, mostly recall (+0.074) and state accuracy (+0.087); country
+accuracy improves by 2.6 points. It is also cheaper (6 vs 14 author requests), because the
+agent does not have to rediscover the label universe. This is a clear win for passing the
+Uwazi country list, and the main TASKS experimental factor we can answer with confidence.
+
+Positions/sizes were not provided to either extractor; that TASKS factor is still untested
+here (our own pipeline's segments+position variant remains the evidence for it).
+
+**Status:** the no-title v3 adapter covers all eight single Plan fields with gold, UPR state,
+and UPR recommendation records. The country-list A/B is done (the list clearly helps).
+Remaining TASKS factors: position/size input and prompt variants. The full
+`GenerateScriptUseCase` bulk-script path remains out of scope.
 
 ### What the v2 numbers show
 

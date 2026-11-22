@@ -145,6 +145,7 @@ Return the function plus honest samples_total / samples_matched counts.
 
 
 PROMPT_VERSION_RECOMMENDATIONS = "admin-agent-v3-records-no-title"
+PROMPT_VERSION_RECOMMENDATIONS_NO_LIST = "admin-agent-v3-records-no-title-no-list"
 
 
 def build_recommendations_task(
@@ -156,6 +157,7 @@ def build_recommendations_task(
     language: str = "en",
     title_visible: bool = False,
     target_metadata_hidden: bool = True,
+    include_state_list: bool = True,
 ) -> str:
     """Authoring task for UPR recommendation record extraction.
 
@@ -178,6 +180,27 @@ def build_recommendations_task(
         if target_metadata_hidden
         else "- Metadata, including the linked recommendation ids, is visible."
     )
+    if include_state_list:
+        countries_instruction = (
+            "- `countries`: recommending-state labels verbatim from the candidate list. Use []\n"
+            "  when the text names none."
+        )
+        candidate_block = (
+            "CANDIDATE STATE LABELS (use these verbatim for `state_under_review` and `countries`;\n"
+            "document spellings may differ — use `textmatch` to map a spelling to a label):\n"
+            f"{_bullet_list(state_labels, limit=500)}"
+        )
+    else:
+        countries_instruction = (
+            "- `countries`: recommending-state names as printed in the document, normalized to the\n"
+            "  Uwazi State spelling from your own knowledge. No candidate list is provided. Use []\n"
+            "  when the text names none."
+        )
+        candidate_block = (
+            "NO CANDIDATE STATE LIST IS PROVIDED in this condition. Infer `state_under_review`\n"
+            "and `countries` from the document text and your own knowledge of Uwazi State labels;\n"
+            "do not invent a country that is not named in the text."
+        )
     return f"""\
 TASK: author ONE deterministic extraction function that extracts UPR recommendation RECORDS.
 
@@ -202,8 +225,7 @@ OUTPUT CONTRACT (still the extractor signature from your system prompt)
   sub-numbers. Do not use a page number.
 - `text`: the recommendation statement only. Exclude the trailing country
   parenthetical/semicolon; the recommending states belong in `countries`.
-- `countries`: recommending-state labels verbatim from the candidate list. Use [] when
-  the text names none.
+{countries_instruction}
 - Return `None` only when the document contains no recommendations at all.
 {title_block}
 {target_block}
@@ -220,9 +242,7 @@ SOURCE: primary-document segmentation
   recommendations will be examined", or a numbered list; the state under review is on
   page 1.
 
-CANDIDATE STATE LABELS (use these verbatim for `state_under_review` and `countries`;
-document spellings may differ — use `textmatch` to map a spelling to a label):
-{_bullet_list(state_labels, limit=500)}
+{candidate_block}
 
 TRAINING EVIDENCE (the ONLY documents you may look at)
 - {train_total} train document(s) are available through the read-only ports. Discover

@@ -258,3 +258,18 @@ def test_score_records_scores_upr_recommendation_records() -> None:
     assert scored[0]["status"] == "hit"
     assert metrics["primary"]["metric"] == "f1"
     assert metrics["primary"]["test"] == 1.0
+
+
+def test_recommendations_task_no_country_list_variant() -> None:
+    task = prompt.build_recommendations_task(
+        dataset_id="upr_recommendations",
+        template_name="Document",
+        train_total=50,
+        state_labels=["France", "Spain"],
+        include_state_list=False,
+    )
+
+    assert "CANDIDATE STATE LABELS" not in task
+    assert "France" not in task
+    assert "NO CANDIDATE STATE LIST IS PROVIDED" in task
+    assert prompt.PROMPT_VERSION_RECOMMENDATIONS_NO_LIST != prompt.PROMPT_VERSION_RECOMMENDATIONS

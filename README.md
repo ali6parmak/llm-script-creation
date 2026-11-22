@@ -71,7 +71,9 @@ uv run benchmark-admin-agent --dataset upr_recommendations
 `state_under_review` gold field; the task receives all 195 Uwazi State labels.
 `upr_recommendations` is **record extraction**, not a record write: the extractor returns a
 list of `{number, text, countries}` records plus the state, which our existing UPR evaluator
-scores. The full create-and-link path remains out of scope.
+scores. The full create-and-link path remains out of scope. Add `--no-country-list` to omit
+the 195 candidate State labels; on the full run that drops test F1 from 0.979 to 0.939, so
+the list is a real win.
 
 The admin repo's `.venv` currently predates two dependencies declared in its `pyproject.toml`
 (`rapidfuzz`, `python-dateutil`). Rather than modify that read-only repo, the sidecar layers

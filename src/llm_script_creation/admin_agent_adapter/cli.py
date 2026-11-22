@@ -284,7 +284,12 @@ def _sidecar_usage(response: dict[str, Any]) -> dict[str, Any]:
     return usage
 
 
-def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dict[str, Any]:
+def run(
+    dataset_id: str,
+    limit_train: int | None,
+    limit_test: int | None,
+    include_country_list: bool = True,
+) -> dict[str, Any]:
     conn = catalog.connect()
     try:
         dataset = _load_dataset(conn, dataset_id)
@@ -323,6 +328,11 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
 
     redact_properties = _target_properties(dataset_id, field)
     if is_records:
+        prompt_version = (
+            prompt.PROMPT_VERSION_RECOMMENDATIONS
+            if include_country_list
+            else prompt.PROMPT_VERSION_RECOMMENDATIONS_NO_LIST
+        )
         task_prompt = prompt.build_recommendations_task(
             dataset_id=dataset_id,
             template_name=template["name"],
@@ -330,8 +340,10 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
             state_labels=_candidate_values("upr_state", "relationship", train_records, field) or [],
             title_visible=TITLE_VISIBLE,
             target_metadata_hidden=True,
+            include_state_list=include_country_list,
         )
     else:
+        prompt_version = prompt.PROMPT_VERSION
         task_prompt = prompt.build_author_task(
             dataset_id=dataset_id,
             property_name=property_name,
@@ -449,9 +461,6 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
 
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
-    prompt_version = (
-        prompt.PROMPT_VERSION_RECOMMENDATIONS if is_records else prompt.PROMPT_VERSION
-    )
     prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
     method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}"
     config = {
@@ -468,7 +477,11 @@ def run(dataset_id: str, limit_train: int | None, limit_test: int | None) -> dic
         "benchmark_field": field,
         "benchmark_fields": fields,
         "property_type": property_type,
-        "candidate_values": len(_candidate_values(dataset_id, property_type, train_records, field) or []),
+        "candidate_values": (
+            len(_candidate_values(dataset_id, property_type, train_records, field) or [])
+            if include_country_list
+            else 0
+        ),
         "admin_agent_model": author.get("model"),
         "admin_agent_base_url": author.get("base_url"),
         "max_requests": author_request["max_requests"],
@@ -560,12 +573,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", required=True, help="single-field Plan dataset id, e.g. plan_year")
     parser.add_argument("--limit-train", type=int, default=None, help="limit train documents (spike)")
     parser.add_argument("--limit-test", type=int, default=None, help="limit test documents (spike)")
+    parser.add_argument(
+        "--no-country-list",
+        action="store_true",
+        help="UPR recommendations only: do not put the 195 candidate State labels in the task.",
+    )
     args = parser.parse_args(argv)
 
     if not CATALOG_PATH.exists():
         raise SystemExit("Catalog missing. Run `uv run build-datasets` first.")
     _preflight()
-    result = run(args.dataset, args.limit_train, args.limit_test)
+    result = run(
+        args.dataset,
+        args.limit_train,
+        args.limit_test,
+        include_country_list=not args.no_country_list,
+    )
     print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
     return 0
 
