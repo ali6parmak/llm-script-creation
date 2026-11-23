@@ -674,207 +674,86 @@ uv run benchmark-admin-agent --replay <method_id> --replay-mode author
 recorded in its spec; the original is untouched. Methods created before this change have no
 `spec.json` and cannot be replayed, but their prompt/script/predictions are still on disk.
 
-**Results (v2-50train, seed 42, 2026-11-20):**
+**Canonical results (v2-50train, seed 42; re-created 2026-11-23).** Every admin method below
+was re-created after the spec/replay change, so each has a `spec.json` with its exact selected
+train ids, prompt hash and condition. The old pre-spec admin methods/runs are archived under
+`artifacts/archive/admin_agent_pre_spec_20261123/`. `plan_body` is skipped: its train split has
+50 distinct rare labels and zero General Assembly / Human Rights Council documents, so it does
+not measure the agent.
 
-| Dataset | Train (50) | Test | Gap | Coverage (test) | Admin eval | Test statuses | Author requests | Tokens |
-|---|---:|---:|---:|---:|---:|---|---:|---:|
-| `plan_year` | 0.960 | **0.934** (9,304 / 9,965) | +0.026 | 99.7% | 93.4% (10,015 judged) | 9,304 hit · 628 wrong · 33 missing | 14 | 1,089,919 |
-| `plan_document_code` | 0.800 | **0.973** (8,232 / 8,458) | −0.173 | 99.4% | 96.3% (8,508 judged) | 8,232 hit · 178 wrong · 48 missing | 13 | 1,186,141 |
-| `plan_document_type` | 0.940 | **0.894** (2,437 / 2,725) | +0.046 | 91.4% | 89.5% (2,775 judged) | 2,437 hit · 53 wrong · 235 missing | 18 | 2,954,941 |
+Conditions re-created:
 
-The three rows above used prompt v1, which listed up to 20 train shared_ids in the task
-(the variant discussed below). The 5/5 spike scored 5/5 train and 5/5 test (admin eval 100%).
-On the full run the admin
-agent sampled 12 train documents with `peek_segmentation_by_entity` and used
-`benchmark_extractor` three times. The returned function uses ordered fallbacks: a
-compilation-entry lookup keyed on the entity's own `field_document_number` metadata (needed
-because one PDF can hold many conclusions), then the official "Distr.: General <date>"
-header year, then a heading-style `(YYYY)`, then the first full date in the text. That
-metadata-aware compilation rule is a concrete example of the production-context condition
-doing work: with title/metadata hidden it could not disambiguate a shared PDF.
+- **v1** — title visible, 20 train ids in the stored task prompt, target metadata visible.
+- **v2** — title visible, no ids, target metadata visible.
+- **v3** — no title, target removed from execution metadata, other metadata visible.
+- **factor runs** — v3 with `--no-country-list`, `--geometry`, `--no-metadata`, and
+  `--geometry --no-metadata`.
 
-The dominant error class is the year disagreement between a document's adoption date and its
-distribution/header date (e.g. shared_id `5zhgytix6is`: gold 2015, header 2016). The
-extractor's unmatched notes document this as a curation inconsistency. 33 test documents
-return `None` (no full date found) and are counted as missing, not wrong.
+**v1/v2 prompt replay (stored `prompt.txt`, same 50-doc train split):**
 
-On `plan_document_code` the extractor reads the repeated running header/cover symbol (with a
-fallback for Commission on Human Rights resolution pages) and reaches 0.973 test over 8,458
-documents; the negative train→test gap is the same stratified-train effect seen for the LLM
-scripts (rare code families are concentrated in the 50 train documents).
+| Dataset | Prompt | Train | Test | Test hit / wrong / missing | Requests |
+|---|---|---:|---:|---|---:|
+| `plan_year` | v1 | 0.900 | 0.928 | 9,244 / 560 / 161 | 16 |
+| `plan_document_code` | v1 | 0.760 | 0.924 | 7,818 / 197 / 443 | 11 |
+| `plan_document_type` | v1 | 0.960 | 0.918 | 2,502 / 210 / 13 | 16 |
+| `plan_year` | v2 | 0.960 | 0.941 | 9,382 / 580 / 3 | 17 |
 
-On `plan_document_type` the extractor keys off UN header/signature phrases (resolution
-headers, ExCom conclusion titles, "agreed as follows" plus a regional-body check, CSW agreed
-conclusions, treaty-body general comments, SRSG/mandate reports, declarations). It samples
-29/30 train documents correctly, but test coverage drops to 91.4%: 235 documents return
-`None`, mostly Resolutions (182) whose first pages lack the header phrases the extractor
-requires. The most common wrong labels are Resolution→Special Procedures' report (16) and
-Resolution→CSW Agreed Conclusions (13). This is an authoring-sample coverage limit, not a
-test-set tuning issue: the 50/30 train sample simply does not exhibit every resolution
-header variant. It is reported as-is because phase 1 fixes the admin agent's prompt and
-sampling behavior.
+**v3 canonical (no title, target redacted, other metadata visible):**
 
-**Prompt variant v2: no injected shared_ids.** Prompt v1 listed up to 20 train shared_ids in
-the task. That was an adapter convenience, not part of the admin agent's own workflow, and it
-risked anchoring which documents the extractor sampled. `prompt.PROMPT_VERSION =
-"admin-agent-v2-no-ids"` removes the list and the `by_ids` hint; the task now states only the
-train count and tells the extractor to discover samples with
-`query_entities(mode="by_template")`. Re-running `plan_year` gives:
-
-| `plan_year` prompt | Train | Test | Test hit / wrong / missing | Author requests | Tokens |
-|---|---:|---:|---|---:|---:|
-| v1 (ids injected) | 0.960 | 0.934 | 9,304 / 628 / 33 | 14 | 1,089,919 |
-| v2 (no ids) | 0.900 | 0.939 | 9,360 / 517 / 88 | 18 | 1,907,173 |
-
-The +0.005 test difference is **not** a clean id-list effect: the v2 extractor chose a
-different first rule — the year in the entity TITLE, e.g. `... (2011)` — before any
-segmentation rule. 7,258 of the 9,965 test documents carry a `(YYYY)` in the title; v2
-predicts that title year for all 7,258 and gets 7,233 right (99.7%). On the remaining 2,707
-documents it scores 0.786. The v1 extractor did not use the title. So v2's test number is
-mostly a **title shortcut** under the production-context condition, not a better document
-reader; its lower train score and extra 55 missing predictions also show it is not simply
-"better". Removing the ids was still the right call, but it cannot be evaluated in isolation
-while the title is visible. The **no-title condition is now the necessary next experiment**,
-not an optional one.
-
-**No-title condition (v3).** `prompt.PROMPT_VERSION = "admin-agent-v3-no-title"` hides the
-title from `AgentEntity`, raw entities, query summaries and `ctx`, and removes the target
-property from `ctx.metadata` in the execution payload. Re-running `plan_year`:
-
-| `plan_year` prompt | Train | Test | Test hit / wrong / missing | Coverage | Author requests | Tokens |
+| Dataset | Train | Test | Test hit / wrong / missing | Coverage | Requests | Tokens |
 |---|---:|---:|---|---:|---:|---:|
-| v1 (title visible, ids) | 0.960 | 0.934 | 9,304 / 628 / 33 | 99.7% | 14 | 1,089,919 |
-| v2 (title visible, no ids) | 0.900 | 0.939 | 9,360 / 517 / 88 | 99.1% | 18 | 1,907,173 |
-| v3 (no title) | 0.920 | 0.932 | 9,288 / 675 / 2 | 99.98% | 12 | 734,535 |
+| `plan_year` | 1.000 | **0.976**¹ | 9,725 / 229 / 11 | 99.9% | 11 | 385,290 |
+| `plan_document_code` | 0.860 | **0.969** | 8,196 / 159 / 103 | 98.7% | 13 | 1,962,434 |
+| `plan_document_type` | 0.980 | **0.924** | 2,517 / 208 / 0 | 100.0% | 14 | 2,025,598 |
+| `plan_legal_status` | 0.980 | **0.959** | 2,613 / 65 / 47 | 98.3% | 11 | 838,255 |
+| `plan_means_of_adoption` | 0.510 | **0.484** | 1,319 / 438 / 967 | 64.4% | 17 | 2,219,021 |
+| `plan_field_month` | 0.940 | **0.904** | 1,369 / 136 / 10 | 99.3% | 15 | 1,196,806 |
+| `plan_field_document_number` | 0.580 | **0.607** | 723 / 2 / 466 | 60.8% | 15 | 2,392,215 |
+| `upr_state` | 1.000 | **1.000** | 115 / 0 / 0 | 100.0% | 5 | 348,320 |
+| `upr_recommendations` | 0.984 | **F1 0.971** | 112 hit · 2 partial | 100.0% | 5 | 343,502 |
 
-The v3 extractor is a clean, simple rule: **first plausible four-digit year in the document
-text**, with a `dateparse` fallback on the first 2,000 characters. It never reads `ctx`.
-That is effectively the regex baseline (0.932 test), so under the no-title condition the
-admin agent's strategy is **baseline-level on `plan_year`**, not the metadata-aware
-compilation strategy of v1. The title was doing the work in v2; without it, the agent
-converges to the obvious heuristic. Coverage is 99.98% (only 2 missing), so the remaining
-error is wrong-year choice, not abstention.
+¹ **`plan_year` 0.976 is a metadata shortcut, not a document-reading result.** The extractor's
+first rule reads `topics_in_related_paragraphs` labels (`"<title> <year>, para. N"`). With
+`--no-metadata` the same condition scores **0.931**. This is the clearest lesson of the
+re-creation: production metadata can carry the answer, so the clean text-only condition is
+the right one for extraction claims.
 
-**Full Plan sweep under v3 (no title, target removed from execution metadata):**
+UPR state's 1.000 agrees with our canonical-state evaluation; the admin display scorer reports
+98.8% only because two gold labels carry a trailing newline.
 
-| Dataset | Train | Test | Test hit / wrong / missing | Coverage | Author requests | Tokens |
-|---|---:|---:|---|---:|---:|---:|
-| `plan_year` | 0.920 | 0.932 | 9,288 / 675 / 2 | 99.98% | 12 | 734,535 |
-| `plan_document_code` | 0.760 | 0.974 | 8,241 / 134 / 83 | 99.0% | 13 | 972,044 |
-| `plan_document_type` | 0.940 | 0.885 | 2,412 / 263 / 50 | 98.2% | 21 | 2,889,624 |
-| `plan_legal_status` | 1.000 | 0.968 | 2,639 / 17 / 69 | 97.5% | 13 | 1,611,385 |
-| `plan_means_of_adoption` | 0.857 | 0.709 | 1,932 / 792 / 0 | 100.0% | 14 | 1,808,253 |
-| `plan_body` | 0.760 | **0.055** | 550 / 1,525 / 8,012 | 20.6% | 16 | 2,018,858 |
-| `plan_field_month` | 0.940 | 0.915 | 1,386 / 124 / 5 | 99.7% | 16 | 1,304,856 |
-| `plan_field_document_number` | 0.540 | 0.606 | 722 / 105 / 364 | 69.1% | 21 | 3,976,425 |
+New UPR recommendation detail (with country list): P 0.971 / R 0.971 / **F1 0.971**;
+26,186 of 26,964 matched; text F1 0.994; country 0.945; exact number 0.991; state 1.000.
 
-Three results need context:
+**Factor runs, re-created (v3):**
 
-- **`plan_body` is not a valid capability result under the current split.** Train has 50
-  documents and **50 distinct body labels** (one each, rare-first stratification) and
-  **zero** General Assembly / Human Rights Council documents. Test is 89.7% those two
-  classes: 6,359 GA + 2,691 HRC of 10,087. The extractor authored rules for the rare labels
-  it could see (and got 0.760 on train), then returned `None` for the two dominant test
-  classes. That is a split-design failure, not an agent failure; exclude `plan_body` from
-  admin-agent comparisons until a body-specific split covers the dominant classes.
-- **`plan_means_of_adoption` (0.709)** produced a value for every test document; the errors
-  are label ambiguity, mainly N.A.→Consensus (378), Vote→N.A. (195), and Consensus→N.A.
-  (104). This is a genuine three-way classification difficulty, not abstention.
-- **`plan_field_document_number` (0.606, 69.1% coverage)** is the weakest legitimate field:
-  identifiers are inconsistent across documents and the extractor abstained on 364 test
-  documents. `plan_document_code` (0.974) and `plan_legal_status` (0.968) are strong;
-  `plan_field_month` (0.915) is close behind.
+| Condition | Task | Test | Notes |
+|---|---|---:|---|
+| no country list | `upr_recommendations` | F1 **0.980** | P 0.977 / R 0.982; country 0.933; state 0.965. With the list: F1 0.971, country 0.945, state 1.000. |
+| geometry | `plan_year` | 0.976 | Same metadata shortcut; geometry is not the cause. |
+| geometry | `upr_recommendations` | F1 **0.936** | R 0.910, country 0.984, state 1.000. Worse than text this run. |
+| no metadata | `plan_year` | **0.931** | Clean text-only. |
+| geometry + no metadata | `plan_year` | **0.920** | Clean text-only; no position gain. |
 
-**Two scoring views.** Our evaluator normalizes document codes (case/punctuation/spacing), so
-a prediction `A/RES/64/74` matches gold `A/RES/64/74*`. The admin agent's own
-`extraction_eval` compares rendered display strings, so it counts those 82 starred gold codes
-as mismatches: 8,190 matched / 263 mismatched / 55 missing (96.26%) versus our 8,272 hit /
-181 wrong / 55 missing. Neither is wrong for its purpose; our normalization is the benchmark
-rule used to compare methods, and the admin view is recorded as-is. The two views agree on
-every other document for this field.
+**What replicated, and what did not.** The old pre-spec claims do not survive re-creation:
 
-**UPR state (no title, v3).** `state_reviewed` is a relationship property, so the task uses
-the real property name and the sidecar maps the prediction back to our `state_under_review`
-gold field. The task lists all 195 Uwazi State labels as candidates. Result: **115/115 test
-(1.000)**, 5 author requests, 331,885 tokens. The extractor embeds the candidate list,
-reads the state from page 1, and maps document spellings to the Uwazi label. The admin
-agent's own display scorer reports 98.8% because two gold labels carry a trailing newline
-(`"Trinidad and Tobago\n"`, `"Bosnia and Herzegovina\n"`); our canonical-state
-normalization strips it. This is gold noise, not an extraction miss.
+- **Country list:** the earlier run said with-list 0.979 vs no-list 0.939. The new runs say
+  with-list 0.971 vs no-list 0.980 — the direction flipped. The country-list effect is
+  **not stable across single authoring runs**; we cannot claim it helps without repeats.
+- **Geometry:** with metadata it still looks like 0.976/0.943, but that is the
+  `topics_in_related_paragraphs` shortcut. Clean no-metadata runs are 0.931 text vs 0.920
+  geometry; UPR recommendations are 0.971 text vs 0.936 geometry. There is **no consistent
+  position/size gain** for the admin extractor.
+- **Title:** v2 (title, no ids) scores 0.941 and v3-with-metadata 0.976 (shortcut); the clean
+  no-title run is 0.931. With one run per condition, the title effect is **not separable from
+  run variance and metadata leakage**.
+- **Sampling variance is large:** `plan_means_of_adoption` fell from 0.709 to 0.484 with the
+  same settings; the new extractor sampled 14/30 train docs and abstained on 967 test docs.
+  This is exactly the problem the sampling-policy experiment should address.
 
-**UPR recommendations (record extraction, no title, v3).** This is the biggest TASKS item.
-The task asks for `{"state_under_review": label, "recommendations": [{number, text,
-countries}]}`, lists all 195 State labels, and tells the extractor that
-`benchmark_extractor` cannot score a recommendation list (the document metadata only links
-recommendation ids, not their text), so it must self-prove on sampled documents. The
-extractor was authored from only **4 sampled train documents**; it parses section II of the
-Working Group report, skips page furniture, merges cross-page continuations, and splits
-multi-country recommendations into sub-numbered records.
-
-| UPR recommendations | Test |
-|---|---:|
-| Documents | 114 |
-| Gold / predicted / matched | 26,964 / 27,014 / 26,431 |
-| Precision / recall / F1 | 0.978 / 0.980 / **0.979** |
-| Text F1 | 0.9995 |
-| Country accuracy | 0.982 |
-| Exact-number accuracy | 0.991 |
-| State accuracy | 0.991 |
-| Statuses | 111 hit · 3 partial · 0 wrong · 0 missing |
-
-Train F1 is 0.995; the run used 6 author requests and 545,166 tokens. This **beats our own
-script pipeline** (`0.945` test with segments+position) and the deterministic baseline
-(`0.883`) without using positions at all. The `admin_eval` stored for this run is
-**state-only** (98.2%); it is not a recommendation score and should not be compared with the
-F1 above.
-
-**Country-list A/B (the TASKS "pass the list of countries" question).** Both runs use the
-same dataset, model, no-title condition and train/test split; the only change is whether the
-task includes the 195 Uwazi State labels (`--no-country-list` removes them). The no-list
-extractor produced a small hand-written printed→Uwazi map (Congo, Syrian Arab Republic,
-Micronesia, …) instead of the full list.
-
-| UPR recommendations | P | R | F1 | Text F1 | Country | Number | State | Statuses | Requests | Tokens |
-|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|
-| with 195 labels | 0.978 | 0.980 | **0.979** | 0.9995 | 0.982 | 0.991 | 0.991 | 111 hit · 3 partial | 6 | 545,166 |
-| no list | 0.975 | 0.906 | 0.939 | 0.9997 | 0.956 | 0.986 | 0.904 | 89 hit · 25 partial | 14 | 1,699,722 |
-
-The list is worth **+0.040 F1**, mostly recall (+0.074) and state accuracy (+0.087); country
-accuracy improves by 2.6 points. It is also cheaper (6 vs 14 author requests), because the
-agent does not have to rediscover the label universe. This is a clear win for passing the
-Uwazi country list, and the main TASKS experimental factor we can answer with confidence.
-
-**Position/size A/B (geometry condition).** `--geometry` prefixes every paragraph with
-`[pPAGE x=LEFT y=TOP w=WIDTH h=HEIGHT]` (integer PDF coordinates); the task explains the
-prefix and tells the extractor to strip it before returning text. Results:
-
-| Run | Train | Test | Request / tokens |
-|---|---:|---:|---:|
-| `plan_year` text, metadata visible | 0.920 | 0.932 | 12 / 734,535 |
-| `plan_year` geometry, metadata visible | 0.980 | 0.943 | 16 / 1,500,463 |
-| `plan_year` text, **no metadata** | 0.940 | 0.933 | 10 / 600,606 |
-| `plan_year` geometry, **no metadata** | 0.900 | 0.926 | 12 / 771,376 |
-| UPR recs text | 0.995 | 0.979 | 6 / 545,166 |
-| UPR recs geometry | 0.995 | 0.978 | 18 / 3,215,315 |
-
-The first geometry run's +0.011 looked like a position effect, but its extractor's first
-rule read `topics_in_related_paragraphs` metadata labels (which contain years), so the gain
-was a **metadata shortcut**, not geometry. The clean `--no-metadata` A/B is 0.933 text vs
-0.926 geometry. The geometry extractor strips the prefixes but does not use the coordinates
-for any decision; it just adds parsing work. UPR recommendations are effectively unchanged
-(0.979 → 0.978) at 3× the requests and tokens; that extractor also strips the prefixes
-without using positions.
-
-**Conclusion for TASKS:** positions/sizes do **not** improve the admin extractor on these
-tasks. The earlier segments+position gain belongs to our own script pipeline (a different
-method), not to the admin agent. Also note the metadata leak: `topics_in_related_paragraphs`
-labels contain years, so `--no-metadata` is the clean text-only condition.
-
-**Status:** the no-title v3 adapter covers all eight single Plan fields with gold, UPR state,
-and UPR recommendation records. The country-list A/B is done (the list clearly helps) and
-the position/size A/B is done (no gain for the admin extractor). Remaining TASKS factor:
-controlled prompt variants with repeated runs. The full `GenerateScriptUseCase` bulk-script
-path remains out of scope.
+**Status:** the canonical set is re-created and self-contained; the old admin results are
+archived. Next: repeat the key conditions to estimate variance, then compare sampling policies
+(agent-chosen vs coverage/similarity) under specs. The full `GenerateScriptUseCase`
+bulk-script path remains out of scope.
 
 ### What the v2 numbers show
 

@@ -359,6 +359,8 @@ def run(
     method_suffix: str = "",
     sampling_policy: str = "agent_all_train",
     title_visible_override: bool | None = None,
+    redact_target_metadata: bool = True,
+    prompt_source_path: str | None = None,
 ) -> dict[str, Any]:
     if geometry and not include_country_list:
         raise SystemExit("--geometry with --no-country-list is not a supported combination.")
@@ -414,7 +416,9 @@ def run(
     directory = WORK_DIR / "admin_agent" / f"{stamp}_{runs.slug(dataset_id)}"
     directory.mkdir(parents=True, exist_ok=True)
 
-    redact_properties = _target_properties(dataset_id, field)
+    redact_properties = (
+        _target_properties(dataset_id, field) if redact_target_metadata else set()
+    )
     if prompt_override is not None:
         task_prompt = prompt_override
         prompt_version = prompt_version_override or prompt.PROMPT_VERSION
@@ -597,11 +601,17 @@ def run(
         "prompt_version": prompt_version,
         "prompt_sha256": hashlib.sha256(task_prompt.encode()).hexdigest(),
         "prompt_chars": len(task_prompt),
+        "prompt_source": {
+            "kind": "file" if prompt_source_path else "builder",
+            "path": prompt_source_path,
+            "label": prompt_version,
+        },
         "condition": {
             "title_visible": title_visible,
             "no_metadata": no_metadata,
             "metadata_visible": not no_metadata,
             "geometry": geometry,
+            "target_property_visible_at_execution": not redact_target_metadata,
             "target_properties_redacted": sorted(redact_properties),
         },
         "sampling": {
@@ -643,7 +653,7 @@ def run(
         "condition": "no_title",
         "prompt_version": prompt_version,
         "title_visible": title_visible,
-        "target_property_visible_at_execution": False,
+        "target_property_visible_at_execution": not redact_target_metadata,
         "target_properties_redacted": sorted(redact_properties),
         "source": "primary-document segmentation",
         "template_name": template["name"],
@@ -784,6 +794,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Drop ctx.metadata entirely at execution time (clean text-only condition).",
     )
     parser.add_argument(
+        "--prompt-file",
+        default=None,
+        help="Use a stored task prompt file instead of the current prompt builder.",
+    )
+    parser.add_argument(
+        "--prompt-label",
+        default=None,
+        help="Prompt version label for --prompt-file (e.g. admin-agent-v1-ids).",
+    )
+    parser.add_argument(
+        "--with-title",
+        action="store_true",
+        help="Title-visible condition (old v1/v2 runs).",
+    )
+    parser.add_argument(
+        "--target-metadata-visible",
+        action="store_true",
+        help="Do not remove the target property from execution metadata (old v1/v2 runs).",
+    )
+    parser.add_argument(
         "--replay",
         default=None,
         help="Replay a method from its spec.json (see --replay-mode).",
@@ -811,6 +841,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not args.dataset:
         raise SystemExit("--dataset is required unless --replay is used.")
+    prompt_text = None
+    if args.prompt_file:
+        prompt_path = Path(args.prompt_file)
+        if not prompt_path.exists():
+            raise SystemExit(f"Prompt file not found: {prompt_path}")
+        prompt_text = prompt_path.read_text(encoding="utf-8")
     result = run(
         args.dataset,
         args.limit_train,
@@ -818,6 +854,13 @@ def main(argv: list[str] | None = None) -> int:
         include_country_list=not args.no_country_list,
         geometry=args.geometry,
         no_metadata=args.no_metadata,
+        prompt_override=prompt_text,
+        prompt_version_override=(
+            args.prompt_label or "legacy-prompt" if prompt_text is not None else None
+        ),
+        title_visible_override=True if args.with_title else None,
+        redact_target_metadata=not args.target_metadata_visible,
+        prompt_source_path=args.prompt_file,
     )
     print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
     return 0

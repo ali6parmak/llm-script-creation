@@ -71,12 +71,22 @@ uv run benchmark-admin-agent --dataset upr_recommendations
 `state_under_review` gold field; the task receives all 195 Uwazi State labels.
 `upr_recommendations` is **record extraction**, not a record write: the extractor returns a
 list of `{number, text, countries}` records plus the state, which our existing UPR evaluator
-scores. The full create-and-link path remains out of scope. Add `--no-country-list` to omit
-the 195 candidate State labels; on the full run that drops test F1 from 0.979 to 0.939, so
-the list is a real win. Add `--geometry` to prefix every paragraph with
-`[pPAGE x=… y=… w=… h=…]`; in the A/B it did not improve the admin extractor (plan year
-0.933 text vs 0.926 geometry; UPR recs 0.979 vs 0.978). Add `--no-metadata` for a clean
-text-only execution condition (the target and all other metadata are absent).
+scores. The full create-and-link path remains out of scope.
+
+Factor flags:
+
+- `--no-country-list` omits the 195 candidate State labels. The re-created A/B gave **with list
+  F1 0.971 vs without 0.980**, while the pre-spec run gave 0.979 vs 0.939. The effect is **not
+  stable across runs**; do not claim a win without repeats.
+- `--geometry` prefixes every paragraph with `[pPAGE x=… y=… w=… h=…]`. Clean no-metadata
+  `plan_year` is 0.931 text vs 0.920 geometry; UPR recommendations are 0.971 vs 0.936. With
+  metadata visible, `plan_year`'s 0.976 is a `topics_in_related_paragraphs` shortcut, not a
+  position effect.
+- `--no-metadata` gives the clean text-only execution condition (target and all other metadata
+  absent). This is the right condition for extraction claims.
+
+Legacy prompt replay: `--prompt-file PATH --prompt-label LABEL --with-title
+--target-metadata-visible` re-runs the archived v1/v2 task prompts under the current spec.
 
 The admin repo's `.venv` currently predates two dependencies declared in its `pyproject.toml`
 (`rapidfuzz`, `python-dateutil`). Rather than modify that read-only repo, the sidecar layers
@@ -93,7 +103,9 @@ uv pip install --target work/admin_agent_extra \
 
 New methods write a `spec.json` next to `method.json`: prompt hash/version, condition, selected
 train shared_ids, sampling policy, candidate-list flags, model, split policy, adapter/git
-version, and evaluator hashes. Method ids include a short spec hash; an existing id is never
+version, and evaluator hashes. The pre-spec admin results are archived under
+`artifacts/archive/admin_agent_pre_spec_20261123/`; the canonical admin set was re-created with
+specs. Method ids include a short spec hash; an existing id is never
 overwritten (a `-r<timestamp>` suffix is added). Replay a method without touching its artifacts:
 
 ```bash
