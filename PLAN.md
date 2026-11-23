@@ -753,8 +753,11 @@ New UPR recommendation detail (with country list): P 0.971 / R 0.971 / **F1 0.97
 **Status:** the canonical set is re-created and self-contained; the old admin results are
 archived. The authoring-sample A/B is done (below): restricting the universe to 12 coverage
 documents helps UPR recommendations slightly and costs less authoring, but hurts Plan
-classification because the extractor calibrates on the biased sample. Next: a
-prior-preserving/target-stratified sampler, then repeats of the key conditions. The full
+classification because the extractor calibrates on the biased sample. The opt-in repair loop
+is implemented and had a neutral first pass: 10-document validation is too small (it saturates
+or swings), most shown failures were singleton/gold-ambiguous, and holding out 10 of 50 docs
+removes scarce learning examples. Next: systematic-only failure families, a larger/cross-val
+validation signal, and production holdouts that do not shrink the authoring pool. The full
 `GenerateScriptUseCase` bulk-script path remains out of scope.
 
 ### Authoring-sample policies (2026-11-23)
@@ -836,6 +839,57 @@ should add target strata (year decade, recommendation-count bucket) and/or prese
 (e.g. 6 rare + 6 proportional documents) and test ordering (put a common representative first,
 then hard cases). The active second pass remains appropriate for properties and UPR state,
 not for recommendation lists.
+
+### Repair loop (2026-11-23, opt-in)
+
+`--repair` adds a feedback loop on top of the normal one-shot authoring:
+
+1. split the train split into a **40-document feedback pool** and a **10-document frozen
+   validation slice** (proportional by the dataset label, deterministic hash, capped at 20%);
+2. author on the feedback pool only, execute on 40+10 with our evaluator;
+3. feed up to 3 diverse failures from the **feedback pool only** plus the current function
+   back to the nested extractor;
+4. repeat up to 3 rounds, pick the best round on validation (ties broken by the feedback
+   score), then run test once.
+
+Validation docs never appear in an authoring/repair request. `spec.json` records the split,
+feedback/validation ids and per-round scores separately from the spec hash (so the selection
+is reproducible and the outcome does not change the method id). `--replay` execute works on
+the final frozen script; `--replay-mode author` refuses repair methods.
+
+**First-pass results** (one or two runs per cell; controls are `--repair-rounds 0`, i.e. the
+same 40/10 holdout with no repair; baseline is the 3-run `agent` A/B above):
+
+| Dataset | 50-doc baseline | 40/10 control | 40/10 repair |
+|---|---:|---:|---:|
+| `plan_year` | 0.925 [0.920–0.927] | **0.932** | 0.932 · 0.935 |
+| `plan_document_type` | **0.919** [0.889–0.953] | 0.834 | 0.858 |
+
+Round transcripts show why the loop did not move the score:
+
+- `plan_year`: validation was saturated at **1.0** from round 0, so no later round could win
+  on validation. Feedback stayed at 0.925 across rounds even though the shown failures
+  changed (`1977`, `1980`, `2015`), i.e. revisions swapped errors rather than fixing them.
+  The tie-break on feedback score had nothing to select. The repair run matched the control
+  exactly (0.932).
+- `plan_document_type`: feedback improved 0.975→1.000 but validation fell 0.80→0.70, so the
+  loop correctly kept round 0. The recurring failure was a single `missing:Resolution` family.
+  Test was 0.834 (control) / 0.858 (repair) vs 0.919 with all 50 docs: holding out 10 removes
+  rare authoring examples (the validation slice contained the only ExCom/General Comment
+  examples in the 40-doc pool) and that costs more than repair recovers.
+- Leak check: no validation shared_id appeared in any round prompt (checked by
+  `scripts/admin_repair_report.py` over stored attempts).
+
+**Findings.** The orchestration is sound and cheap; the limiting factor is signal quality.
+A 10-document validation slice is too small for model selection (saturates or swings), and
+most failures shown were singleton, possibly gold-ambiguous cases, so the agent had nothing
+systematic to generalise. At 50 train documents, holding out 10 also removes scarce learning
+examples.
+
+**Next:** only feed failure families that occur in at least two documents and are grounded in
+the text; use a larger validation slice or cross-validation; in production, keep authoring on
+the full pool and hold out a separate validation/evaluation stream rather than subtracting
+20% from a small training set.
 
 ### What the v2 numbers show
 

@@ -102,17 +102,18 @@ def build_report(
         "",
         "## Repair runs",
         "",
-        "| Dataset | Method | Val docs | Rounds | Best | Stop | Test | Train | Hit/wrong/missing |",
-        "|---|---|---:|---:|---:|---|---:|---:|---|",
+        "| Dataset | Mode | Method | Val docs | Rounds | Best | Stop | Test | Train | Hit/wrong/missing |",
+        "|---|---|---|---:|---:|---:|---|---:|---:|---|",
     ]
     for spec, run, outcome, _attempts in repair_methods:
         metrics = run.get("metrics") or {}
         primary = metrics.get("primary") or {}
         statuses = (metrics.get("status_counts") or {}).get("test") or {}
         lines.append(
-            "| {dataset} | `{method}` | {val} | {rounds} | {best} | {stop} | {test} | {train} | "
+            "| {dataset} | {mode} | `{method}` | {val} | {rounds} | {best} | {stop} | {test} | {train} | "
             "{hit}/{wrong}/{missing} |".format(
                 dataset=spec.get("dataset_id"),
+                mode="control" if not (spec.get("repair") or {}).get("rounds_requested") else "repair",
                 method=f"{str(spec.get('spec_hash') or '')[:8]}@{str(spec.get('created_at') or '')[11:19]}",
                 val=(spec.get("repair") or {}).get("validation_size"),
                 rounds=outcome.get("rounds_run"),
@@ -170,8 +171,8 @@ def build_report(
     lines += [
         "## Baseline comparison (agent arm, no repair, same no-metadata condition)",
         "",
-        "| Dataset | Baseline mean [min–max] | Repair test | Δ |",
-        "|---|---:|---:|---:|",
+        "| Dataset | Mode | Baseline mean [min–max] | Repair test | Δ |",
+        "|---|---|---:|---:|---:|",
     ]
     for spec, run, _outcome, _attempts in repair_methods:
         dataset_id = str(spec.get("dataset_id"))
@@ -181,8 +182,9 @@ def build_report(
         delta = None if mean is None or test is None else test - mean
         low = min(values) if values else None
         high = max(values) if values else None
+        mode = "control" if not (spec.get("repair") or {}).get("rounds_requested") else "repair"
         lines.append(
-            f"| {dataset_id} | {_fmt(mean)} [{_fmt(low)}–{_fmt(high)}] (n={len(values)}) | "
+            f"| {dataset_id} | {mode} | {_fmt(mean)} [{_fmt(low)}–{_fmt(high)}] (n={len(values)}) | "
             f"{_fmt(test)} | {_fmt(delta)} |"
         )
     lines.append("")
