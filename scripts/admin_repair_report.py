@@ -22,6 +22,7 @@ from typing import Any
 
 from llm_script_creation import runs
 from llm_script_creation.configuration import REPORTS_DIR
+from llm_script_creation.task_ids import V2, V3, base_dataset_id, dataset_version
 
 
 def _spec(method_id: str) -> dict[str, Any] | None:
@@ -64,7 +65,9 @@ def _mean(values: list[Any]) -> float | None:
     return statistics.fmean(numbers) if numbers else None
 
 
-def _baseline_rows(since: datetime | None, datasets: set[str]) -> dict[str, list[dict[str, Any]]]:
+def _baseline_rows(
+    since: datetime | None, datasets: set[str], version: str | None = None
+) -> dict[str, list[dict[str, Any]]]:
     rows: dict[str, list[dict[str, Any]]] = {}
     for method in runs.list_methods():
         method_id = str(method.get("method_id") or "")
@@ -72,7 +75,9 @@ def _baseline_rows(since: datetime | None, datasets: set[str]) -> dict[str, list
         if not spec or (spec.get("repair") or {}).get("enabled"):
             continue
         dataset_id = str(spec.get("dataset_id"))
-        if dataset_id not in datasets:
+        if version is not None and dataset_version(dataset_id) != version:
+            continue
+        if base_dataset_id(dataset_id) not in datasets:
             continue
         condition = spec.get("condition") or {}
         if condition.get("title_visible") is not False or condition.get("no_metadata") is not True:
@@ -92,9 +97,12 @@ def _baseline_rows(since: datetime | None, datasets: set[str]) -> dict[str, list
 def build_report(
     repair_methods: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
     baseline: dict[str, list[dict[str, Any]]],
+    version_label: str = "all versions",
 ) -> str:
     lines = [
         "# Admin-agent repair loop",
+        "",
+        f"Dataset versions in this report: {version_label}.",
         "",
         "Opt-in loop: 40-document feedback pool, frozen stratified validation slice "
         "(never sent to authoring), 2-3 failures per round, best round on validation, "
@@ -266,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
         default="2026-11-23T14:09:15+00:00",
         help="created-at floor for the no-repair agent baseline methods",
     )
+    parser.add_argument(
+        "--dataset-version",
+        choices=["all", V2, V3],
+        default="all",
+        help="only include methods from one split version (default all)",
+    )
     parser.add_argument("--out", default=str(REPORTS_DIR / "admin_repair.md"))
     args = parser.parse_args(argv)
 
@@ -279,7 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         spec = _spec(method_id)
         if not spec or not (spec.get("repair") or {}).get("enabled"):
             continue
-        if spec.get("dataset_id") not in datasets:
+        dataset_id = str(spec.get("dataset_id"))
+        if base_dataset_id(dataset_id) not in datasets:
+            continue
+        if args.dataset_version != "all" and dataset_version(dataset_id) != args.dataset_version:
             continue
         created_at = spec.get("created_at")
         if since is not None and created_at and datetime.fromisoformat(created_at) < since:
@@ -292,8 +309,15 @@ def main(argv: list[str] | None = None) -> int:
     if not repair_methods:
         raise SystemExit("No repair methods found.")
 
+    version_filter = None if args.dataset_version == "all" else args.dataset_version
     report = build_report(
-        repair_methods, _baseline_rows(baseline_since, {str(s.get("dataset_id")) for s, *_ in repair_methods})
+        repair_methods,
+        _baseline_rows(
+            baseline_since,
+            {base_dataset_id(str(s.get("dataset_id"))) for s, *_ in repair_methods},
+            version_filter,
+        ),
+        args.dataset_version,
     )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..task_ids import base_dataset_id
+
 SEED = 42
 DEFAULT_VALIDATION_SIZE = 10
 DEFAULT_REPAIR_EXAMPLES = 3
@@ -45,6 +47,7 @@ def _gold_label(gold: dict[str, Any], field: str) -> str:
 
 def _stratum(dataset_id: str, gold: dict[str, Any]) -> str:
     """The dataset's own label family, so validation keeps the class mix."""
+    dataset_id = base_dataset_id(dataset_id)
     if dataset_id in {
         "plan_document_type",
         "plan_legal_status",
@@ -149,6 +152,7 @@ def split_validation(
     *,
     validation_size: int = DEFAULT_VALIDATION_SIZE,
     seed: int = SEED,
+    max_fraction: float | None = 0.2,
 ) -> RepairSplit:
     """Split train records into a feedback pool and a frozen validation slice.
 
@@ -156,13 +160,19 @@ def split_validation(
     the slice is allocated proportionally, so validation mirrors the training
     distribution instead of over-representing rare classes. Singletons stay in
     the feedback pool unless they win a proportional slot. For small pools the
-    slice is capped at ~20% so a spike still has feedback documents left.
+    slice is capped at ``max_fraction`` (20% by default) so a spike still has
+    feedback documents left. ``max_fraction=None`` honors the requested size up
+    to ``len(records) - 1``; the v3 split uses that to get a full 40-doc
+    validation slice while keeping its 160-doc feedback pool.
     """
     unique = {str(record.get("doc_id")): record for record in records}
     ordered = [dict(unique[doc_id]) for doc_id in sorted(unique)]
     if len(ordered) < 2:
         raise ValueError("repair needs at least two train documents")
-    size = min(int(validation_size), max(1, len(ordered) // 5))
+    cap = len(ordered) - 1
+    if max_fraction is not None:
+        cap = min(cap, max(1, int(len(ordered) * max_fraction)))
+    size = min(int(validation_size), cap)
     groups: dict[str, list[dict[str, Any]]] = {}
     for record in ordered:
         groups.setdefault(_stratum(dataset_id, record.get("gold") or {}), []).append(record)
@@ -330,8 +340,8 @@ def select_failures(
         if status in by_status:
             by_status[status].append(record)
 
-    if dataset_id in {"upr_recommendations", "upr_state"}:
-        builder = _upr_state_example if dataset_id == "upr_state" else _upr_example
+    if base_dataset_id(dataset_id) in {"upr_recommendations", "upr_state"}:
+        builder = _upr_state_example if base_dataset_id(dataset_id) == "upr_state" else _upr_example
     else:
         builder = _plan_example
 

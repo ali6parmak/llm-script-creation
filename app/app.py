@@ -31,6 +31,7 @@ from llm_script_creation import runs as run_artifacts
 from llm_script_creation.configuration import ARTIFACTS_DIR, CATALOG_PATH
 from llm_script_creation.db import document_from_row
 from llm_script_creation.input_spec import InputSpec, prepare_input
+from llm_script_creation.task_ids import dataset_version
 from llm_script_creation.text import document_payload
 
 st.set_page_config(page_title="Uwazi extraction benchmarks", layout="wide")
@@ -258,6 +259,15 @@ def split_badge(split: str) -> str:
     return badge(split, color)
 
 
+def dataset_version_label(row: dict[str, Any]) -> str:
+    """Catalog column, then manifest, then the id suffix (old v2 rows)."""
+    manifest = json.loads(row.get("manifest_json") or "{}")
+    for value in (row.get("dataset_version"), manifest.get("dataset_version")):
+        if value:
+            return str(value)
+    return dataset_version(str(row.get("dataset_id", "")))
+
+
 def dataset_accent(row: dict[str, Any]) -> str:
     if row.get("db") == "upr":
         return PALETTE["blue"]
@@ -275,7 +285,7 @@ def dataset_card(row: dict[str, Any], run_count: int) -> str:
     <div class="uw-card" style="border-left-color:{accent}">
       <div class="uw-card-title">{html.escape(manifest.get("name", row["dataset_id"]))}</div>
       <div class="uw-card-id">{html.escape(row["dataset_id"])}</div>
-      <div>{badge(row.get("task", ""), accent)}{badge(row.get("db", ""), PALETTE["gray"])}</div>
+      <div>{badge(row.get("task", ""), accent)}{badge(row.get("db", ""), PALETTE["gray"])}{badge(dataset_version_label(row), PALETTE["aqua"])}</div>
       <div class="uw-card-desc" style="margin-top:8px">{description}</div>
       <div class="uw-stat-row">
         <div class="uw-stat"><b>{counts.get("train", 0):,}</b><span>train</span></div>
@@ -1243,6 +1253,20 @@ def main() -> None:
     run_index = load_run_index()
     methods = load_methods()
 
+    version_labels = sorted({dataset_version_label(row) for row in datasets})
+    version_choice = st.sidebar.selectbox(
+        "Split version",
+        ["all", *version_labels],
+        help="v2 and v3 are separate experiments; filtering keeps their runs apart.",
+    )
+    if version_choice != "all":
+        datasets = [
+            row for row in datasets if dataset_version_label(row) == version_choice
+        ]
+        dataset_ids = {row["dataset_id"] for row in datasets}
+        run_index = [run for run in run_index if run["dataset_id"] in dataset_ids]
+        methods = [method for method in methods if method.get("dataset_id") in dataset_ids]
+
     page = st.sidebar.radio("View", ["Datasets", "Sample explorer", "Methods", "Compare"])
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Theme")
@@ -1255,6 +1279,7 @@ def main() -> None:
         f"{len(datasets)} datasets · {sum(row['sample_count'] for row in datasets):,} samples"
     )
     st.sidebar.caption(f"{len(methods)} methods · {len(run_index)} runs")
+    st.sidebar.caption(f"Split version: {version_choice}")
 
     if page == "Datasets":
         page_datasets(datasets, run_index)

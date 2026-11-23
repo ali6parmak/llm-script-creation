@@ -40,6 +40,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ..task_ids import base_dataset_id
+
 POLICIES: tuple[str, ...] = ("agent", "coverage", "similarity", "hybrid")
 DEFAULT_SIZE = 12
 
@@ -255,6 +257,7 @@ def _is_multi_entry(first_page: str, full_text: str, page_count: int) -> bool:
 
 def _is_negative(dataset_id: str, gold: dict[str, Any]) -> bool:
     """True when the target is absent from the gold row (a negative sample)."""
+    dataset_id = base_dataset_id(dataset_id)
     if dataset_id == "upr_recommendations":
         return not gold.get("recommendations")
     if dataset_id == "upr_state":
@@ -268,7 +271,7 @@ def _is_negative(dataset_id: str, gold: dict[str, Any]) -> bool:
 
 def _record_flags(dataset_id: str, gold: dict[str, Any]) -> tuple[str, ...]:
     """Hard cases that live in the UPR recommendation gold structure."""
-    if dataset_id != "upr_recommendations":
+    if base_dataset_id(dataset_id) != "upr_recommendations":
         return ()
     recommendations = gold.get("recommendations") or []
     flags = []

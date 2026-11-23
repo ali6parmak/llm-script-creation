@@ -17,7 +17,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,14 +37,65 @@ from .db import (
     load_document,
 )
 from .models import metadata_labels, metadata_values
+from .task_ids import V2, V3, base_dataset_id, dataset_version, versioned_dataset_id
 from .text import ordered_segments, render_text
 
 SEED = 42
 TRAIN_SIZE = 50
 SPLIT_POLICY_VERSION = "v2-50train"
+
+#: v3 scales the same stratified template to a larger train split. A new seed
+#: means v3 is an independent experiment, not a superset of the v2 ids.
+V3_SEED = 43
+V3_TRAIN_SIZE = 200
+V3_VALIDATION_SIZE = 40
+V3_SPLIT_POLICY_VERSION = "v3-200train"
+#: Small pools (notably UPR: 164/165 eligible documents) cannot supply 200 train
+#: documents AND a test split. Keep this many documents out of train so the
+#: frozen test split is never empty.
+V3_MIN_TEST = 40
+
 DB_TEMPLATES = {
     PLAN_DB: PLAN_DOCUMENT_TEMPLATE,
     UPR_DB: UPR_DOCUMENT_TEMPLATE,
+}
+
+
+@dataclass(frozen=True)
+class SplitPolicy:
+    """One versioned split policy (seed, train size, id suffix)."""
+
+    version: str
+    split_policy_version: str
+    seed: int
+    train_size: int
+    validation_size: int
+    suffix: str
+    min_test: int
+
+    def dataset_id(self, base_id: str) -> str:
+        return versioned_dataset_id(base_id, self.version)
+
+
+SPLIT_POLICIES: dict[str, SplitPolicy] = {
+    V2: SplitPolicy(
+        version=V2,
+        split_policy_version=SPLIT_POLICY_VERSION,
+        seed=SEED,
+        train_size=TRAIN_SIZE,
+        validation_size=10,
+        suffix="",
+        min_test=0,
+    ),
+    V3: SplitPolicy(
+        version=V3,
+        split_policy_version=V3_SPLIT_POLICY_VERSION,
+        seed=V3_SEED,
+        train_size=V3_TRAIN_SIZE,
+        validation_size=V3_VALIDATION_SIZE,
+        suffix="_v3",
+        min_test=V3_MIN_TEST,
+    ),
 }
 
 # UPR tasks share one train pool: they ask different questions about the same
@@ -55,6 +106,18 @@ SHARED_TRAIN_GROUPS = {
 }
 
 SPLIT_RULE = (
+    "Deterministic stratified sample of {train_size} train documents per dataset: order "
+    "strata rarest-first, pick one document per stratum, then fill the remaining "
+    "slots proportionally to stratum size. Within a stratum, documents are ordered "
+    "by sha256(seed:dataset:sharedId). Test is every remaining eligible document, "
+    "minus any document that is train in another dataset of the SAME split version "
+    "(cross-dataset isolation; v2 and v3 do not exclude each other). "
+    "upr_state and upr_recommendations share the same {train_size}-document pool. "
+    "Pools with fewer than {min_pool} eligible documents keep at least {min_test} "
+    "documents for test, so they get a smaller train split."
+)
+
+SPLIT_RULE_V2 = (
     "Deterministic stratified sample of 50 train documents per dataset: order "
     "strata rarest-first, pick one document per stratum, then fill the remaining "
     "slots proportionally to stratum size. Within a stratum, documents are ordered "
@@ -177,6 +240,7 @@ def _recommendation_stratum(gold: dict[str, Any]) -> str:
 
 def dataset_stratum(dataset_id: str, gold: dict[str, Any]) -> str:
     """Stratum definition for one dataset; labels/classes where they exist."""
+    dataset_id = base_dataset_id(dataset_id)
     if dataset_id in {
         "plan_document_type",
         "plan_legal_status",
@@ -203,6 +267,7 @@ def dataset_stratum(dataset_id: str, gold: dict[str, Any]) -> str:
 
 
 def stratum_description(dataset_id: str) -> str:
+    dataset_id = base_dataset_id(dataset_id)
     return {
         "plan_document_type": "Uwazi document type label",
         "plan_legal_status": "legal status label",
@@ -479,6 +544,28 @@ DATASETS: tuple[DatasetSpec, ...] = (
 )
 
 
+def dataset_specs(version: str = V2) -> tuple[DatasetSpec, ...]:
+    """Return the task specs for one split version.
+
+    v2 keeps the original dataset ids so existing rows/artifacts are untouched.
+    v3 adds a ``_v3`` suffix and a version-labelled display name in the same
+    catalog/artifacts root.
+    """
+    if version == V2:
+        return DATASETS
+    policy = SPLIT_POLICIES.get(version)
+    if policy is None:
+        raise ValueError(f"unknown split version {version!r}; choose from {tuple(SPLIT_POLICIES)}")
+    return tuple(
+        replace(
+            spec,
+            dataset_id=policy.dataset_id(spec.dataset_id),
+            name=f"{spec.name} ({version}, {policy.train_size} train)",
+        )
+        for spec in DATASETS
+    )
+
+
 # ---------------------------------------------------------------------------
 # Document snapshot
 
@@ -600,20 +687,45 @@ def _label_distribution(spec: DatasetSpec, samples: list[dict[str, Any]]) -> dic
     return distribution
 
 
+def _effective_train_size(available: int, policy: SplitPolicy) -> int:
+    """Requested train size, but never consume the whole small pool."""
+    if available <= 0:
+        return 0
+    return max(1, min(policy.train_size, available - policy.min_test))
+
+
 def select_train_ids(
     samples_by_dataset: dict[str, list[dict[str, Any]]],
+    *,
+    version: str = V2,
 ) -> dict[str, list[str]]:
-    """Select the 50 train ids per dataset, sharing the UPR pool."""
+    """Select the train ids per dataset for one split version.
+
+    The UPR pool is shared inside the version only; a v2 dataset never influences
+    a v3 selection (and vice versa).
+    """
+    policy = SPLIT_POLICIES[version]
     shared: dict[str, list[str]] = {}
     for group in sorted(set(SHARED_TRAIN_GROUPS.values())):
-        members = [name for name, group_name in SHARED_TRAIN_GROUPS.items() if group_name == group]
+        members = [
+            versioned_dataset_id(name, version)
+            for name, group_name in SHARED_TRAIN_GROUPS.items()
+            if group_name == group
+        ]
+        members = [dataset_id for dataset_id in members if dataset_id in samples_by_dataset]
+        if not members:
+            continue
         eligible_sets = [
             {sample["doc_id"] for sample in samples_by_dataset[dataset_id]}
             for dataset_id in members
         ]
         eligible = set.intersection(*eligible_sets)
         # Use the richer recommendation gold for the strata of both UPR tasks.
-        base_dataset = "upr_recommendations" if "upr_recommendations" in members else members[0]
+        base_dataset = (
+            versioned_dataset_id("upr_recommendations", version)
+            if versioned_dataset_id("upr_recommendations", version) in members
+            else members[0]
+        )
         candidates = [
             sample
             for sample in samples_by_dataset[base_dataset]
@@ -625,11 +737,14 @@ def select_train_ids(
             stratum_key=lambda sample, base_dataset=base_dataset: dataset_stratum(
                 base_dataset, sample["gold"]
             ),
+            train_size=_effective_train_size(len(candidates), policy),
+            seed=policy.seed,
         )
 
     train_ids: dict[str, list[str]] = {}
     for dataset_id, samples in samples_by_dataset.items():
-        group = SHARED_TRAIN_GROUPS.get(dataset_id)
+        base_id = base_dataset_id(dataset_id)
+        group = SHARED_TRAIN_GROUPS.get(base_id)
         if group is not None:
             train_ids[dataset_id] = list(shared[group])
             continue
@@ -639,6 +754,8 @@ def select_train_ids(
             stratum_key=lambda sample, dataset_id=dataset_id: dataset_stratum(
                 dataset_id, sample["gold"]
             ),
+            train_size=_effective_train_size(len(samples), policy),
+            seed=policy.seed,
         )
     return train_ids
 
@@ -650,20 +767,22 @@ def assign_splits(
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     """Assign train/test and drop cross-dataset train documents from test.
 
-    A document is identified by (db, sharedId). Any document selected as train
-    in one dataset is excluded from test in every other dataset of the same
-    database, so no test document was seen while writing examples or repairing
-    a script for another task.
+    A document is identified by (db, sharedId, split version). Any document
+    selected as train in one dataset is excluded from test in every other
+    dataset of the same database AND the same split version, so no test document
+    was seen while writing examples or repairing a script for another task. v2
+    and v3 are separate experiments, so they do not exclude each other.
     """
-    global_train: dict[str, set[str]] = {}
+    global_train: dict[tuple[str, str], set[str]] = {}
     for dataset_id, ids in train_ids.items():
-        global_train.setdefault(db_by_dataset[dataset_id], set()).update(ids)
+        key = (db_by_dataset[dataset_id], dataset_version(dataset_id))
+        global_train.setdefault(key, set()).update(ids)
 
     assigned: dict[str, list[dict[str, Any]]] = {}
     excluded_counts: dict[str, int] = {}
     for dataset_id, samples in samples_by_dataset.items():
         train = set(train_ids[dataset_id])
-        train_elsewhere = global_train[db_by_dataset[dataset_id]]
+        train_elsewhere = global_train[(db_by_dataset[dataset_id], dataset_version(dataset_id))]
         rows: list[dict[str, Any]] = []
         excluded = 0
         for sample in samples:
@@ -688,8 +807,13 @@ def _write_dataset(
     train_ids: list[str],
     excluded: int,
     created_at: str,
+    *,
+    version: str = V2,
 ) -> dict[str, Any]:
+    policy = SPLIT_POLICIES[version]
     splits = Counter(sample["split"] for sample in samples)
+    train_count = splits.get("train", 0)
+    validation_count = min(policy.validation_size, max(0, train_count - 1))
     manifest = {
         "dataset_id": spec.dataset_id,
         "name": spec.name,
@@ -700,20 +824,38 @@ def _write_dataset(
         "target_schema": spec.target_schema,
         "known_issues": list(spec.known_issues),
         "primary_metric": spec.primary_metric,
-        "split_policy_version": SPLIT_POLICY_VERSION,
+        "dataset_version": version,
+        "split_policy_version": policy.split_policy_version,
         "split_policy": {
-            "version": SPLIT_POLICY_VERSION,
-            "seed": SEED,
-            "train_size": TRAIN_SIZE,
-            "test": "all remaining eligible documents, minus documents that are train in another dataset",
-            "rule": SPLIT_RULE,
+            "version": policy.split_policy_version,
+            "dataset_version": version,
+            "seed": policy.seed,
+            "train_size": policy.train_size,
+            "train_size_effective": train_count,
+            "validation_size": validation_count,
+            "min_test": policy.min_test,
+            "test": (
+                "all remaining eligible documents, minus documents that are train in "
+                "another dataset of the same split version"
+            ),
+            "rule": (
+                SPLIT_RULE_V2
+                if version == V2
+                else SPLIT_RULE.format(
+                    train_size=policy.train_size,
+                    min_pool=policy.train_size + policy.min_test,
+                    min_test=policy.min_test,
+                )
+            ),
             "strata": stratum_description(spec.dataset_id),
         },
         "counts": {
             "total": len(samples),
-            "train": splits.get("train", 0),
+            "train": train_count,
             "test": splits.get("test", 0),
             "train_examples": 2,
+            "validation": validation_count,
+            "train_feedback": train_count - validation_count,
             "excluded_train_overlap": excluded,
         },
         "train_doc_ids": sorted(train_ids),
@@ -732,7 +874,27 @@ def _write_dataset(
     return manifest
 
 
-def build_datasets() -> dict[str, int]:
+def build_datasets(
+    *,
+    version: str = V2,
+    only: set[str] | None = None,
+) -> dict[str, int]:
+    """Build one split version additively.
+
+    ``build_datasets(version="v3")`` only inserts/overwrites ``*_v3`` dataset
+    rows; v2 rows and artifact directories are not touched. The document table
+    must already exist (the CLI enforces that for v3).
+    """
+    specs = dataset_specs(version)
+    if only:
+        known = {spec.dataset_id for spec in specs}
+        unknown = sorted(only - known)
+        if unknown:
+            raise SystemExit(f"Unknown {version} dataset ids: {unknown}")
+        specs = tuple(spec for spec in specs if spec.dataset_id in only)
+    if not specs:
+        return {}
+
     conn = catalog.connect()
     catalog.init_schema(conn)
     created_at = datetime.now(UTC).isoformat()
@@ -740,7 +902,7 @@ def build_datasets() -> dict[str, int]:
     summary: dict[str, int] = {}
 
     samples_by_dataset: dict[str, list[dict[str, Any]]] = {}
-    for spec in DATASETS:
+    for spec in specs:
         started = time.time()
         mongo_db = db_cache[spec.db]
         samples: list[dict[str, Any]] = []
@@ -752,14 +914,14 @@ def build_datasets() -> dict[str, int]:
         samples_by_dataset[spec.dataset_id] = samples
         print(f"  eligible {spec.dataset_id:<28} {len(samples):>6,} ({time.time() - started:.1f}s)")
 
-    train_ids = select_train_ids(samples_by_dataset)
+    train_ids = select_train_ids(samples_by_dataset, version=version)
     assigned, excluded_counts = assign_splits(
         samples_by_dataset,
         train_ids,
-        {spec.dataset_id: spec.db for spec in DATASETS},
+        {spec.dataset_id: spec.db for spec in specs},
     )
 
-    for spec in DATASETS:
+    for spec in specs:
         samples = assigned[spec.dataset_id]
         manifest = _write_dataset(
             spec,
@@ -767,6 +929,7 @@ def build_datasets() -> dict[str, int]:
             train_ids[spec.dataset_id],
             excluded_counts[spec.dataset_id],
             created_at,
+            version=version,
         )
         catalog.insert_dataset(
             conn,
@@ -780,6 +943,8 @@ def build_datasets() -> dict[str, int]:
                 "known_issues": list(spec.known_issues),
                 "manifest": manifest,
                 "created_at": created_at,
+                "split_policy_version": manifest["split_policy_version"],
+                "dataset_version": version,
             },
             samples,
         )
@@ -788,6 +953,7 @@ def build_datasets() -> dict[str, int]:
         print(
             f"  {spec.dataset_id:<28} {len(samples):>6,} samples "
             f"(train {counts['train']:,} / test {counts['test']:,} / "
+            f"validation {counts['validation']:,} / "
             f"excluded overlap {counts['excluded_train_overlap']:,})",
             flush=True,
         )
@@ -806,7 +972,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="only snapshot documents; do not build datasets",
     )
+    parser.add_argument(
+        "--split-version",
+        choices=sorted(SPLIT_POLICIES),
+        default=V2,
+        help=(
+            "dataset split version to build. v2 is the original 50-train split; v3 is an "
+            "additive 200-train split with *_v3 ids. v3 always reuses the existing catalog "
+            "documents and never resets/rebuilds v2 rows."
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        default=None,
+        help="comma-separated dataset ids (base ids are accepted for the chosen version)",
+    )
     args = parser.parse_args(argv)
+    version = args.split_version
+    if version != V2 and not args.skip_documents:
+        print(
+            f"{version} is additive: reusing the existing catalog documents instead of "
+            "rebuilding/resetting the catalog.",
+            flush=True,
+        )
+        args.skip_documents = True
 
     print("Building document catalog…")
     if not args.skip_documents:
@@ -820,9 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
         build_states()
         return 0
 
+    only = None
+    if args.datasets:
+        requested = {item.strip() for item in args.datasets.split(",") if item.strip()}
+        only = {versioned_dataset_id(item, version) for item in requested}
+
     build_states()
-    print(f"Building datasets into {ARTIFACTS_DIR / 'datasets'}…")
-    summary = build_datasets()
+    print(f"Building {version} datasets into {ARTIFACTS_DIR / 'datasets'}…")
+    summary = build_datasets(version=version, only=only)
     print(f"Built {len(summary)} datasets.")
     return 0
 

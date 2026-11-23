@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS datasets (
     target_schema_json TEXT,
     known_issues_json TEXT,
     manifest_json TEXT,
-    created_at TEXT
+    created_at TEXT,
+    split_policy_version TEXT,
+    dataset_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS samples (
@@ -70,8 +72,25 @@ def connect(path: Path = CATALOG_PATH) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, columns: dict[str, str]
+) -> None:
+    """Add catalog columns introduced after the first build (additive only)."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Existing v2 catalogs predate the dataset-version columns. Adding them is
+    # additive and leaves every v2 dataset/sample row untouched.
+    _ensure_columns(
+        conn,
+        "datasets",
+        {"split_policy_version": "TEXT", "dataset_version": "TEXT"},
+    )
     conn.commit()
 
 
@@ -115,8 +134,9 @@ def insert_dataset(
         """
         INSERT OR REPLACE INTO datasets
             (dataset_id, db, name, task, description, target_schema_json,
-             known_issues_json, manifest_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             known_issues_json, manifest_json, created_at, split_policy_version,
+             dataset_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             dataset["dataset_id"],
@@ -128,6 +148,8 @@ def insert_dataset(
             json.dumps(dataset.get("known_issues", []), ensure_ascii=False),
             json.dumps(dataset.get("manifest", {}), ensure_ascii=False),
             dataset.get("created_at"),
+            dataset.get("split_policy_version"),
+            dataset.get("dataset_version"),
         ),
     )
     # Replace the whole sample set: rebuilt splits must not leave stale rows.

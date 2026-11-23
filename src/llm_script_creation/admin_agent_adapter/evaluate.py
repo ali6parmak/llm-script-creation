@@ -27,6 +27,7 @@ from ..evaluation import (
     evaluate_upr_sample,
     evaluate_upr_state_sample,
 )
+from ..task_ids import base_dataset_id
 
 
 def score_records(
@@ -40,9 +41,10 @@ def score_records(
     ``samples`` are ``{"doc_id", "split", "gold"}`` dicts (from the catalog).
     ``predictions`` maps ``doc_id`` to ``{"prediction", "error", "latency_ms"}``.
     """
-    if dataset_id in {"upr_state", "upr_recommendations"}:
-        kind = dataset_id
-    elif dataset_id.startswith("plan_") and dataset_id != "plan_all_fields":
+    base_id = base_dataset_id(dataset_id)
+    if base_id in {"upr_state", "upr_recommendations"}:
+        kind = base_id
+    elif base_id.startswith("plan_") and base_id != "plan_all_fields":
         kind = "plan"
     else:
         raise ValueError(f"admin-agent adapter does not support dataset {dataset_id!r}")

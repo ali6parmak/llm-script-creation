@@ -36,6 +36,7 @@ from .. import normalization as normalization_module
 from ..configuration import CATALOG_PATH, WORK_DIR
 from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
 from ..normalization import load_states
+from ..task_ids import V3, base_dataset_id, dataset_version
 from . import evaluate, prompt, records, repair, sampling
 
 TYPE = "admin_agent_extractor"
@@ -199,13 +200,13 @@ def _candidate_values(
     dataset_id: str, property_type: str, train_records: list[dict[str, Any]], field: str
 ) -> list[str] | None:
     """Candidate labels the task may show. UPR uses the full Uwazi State list."""
-    if dataset_id in {"upr_state", "upr_recommendations"}:
+    if base_dataset_id(dataset_id) in {"upr_state", "upr_recommendations"}:
         return [str(state["label"]) for state in load_states()]
     return _allowed_values(property_type, train_records, field)
 
 
 def _prompt_extras(dataset_id: str) -> dict[str, str]:
-    if dataset_id == "upr_state":
+    if base_dataset_id(dataset_id) == "upr_state":
         return {
             "value_shape": 'the Uwazi State label verbatim, e.g. "Afghanistan" (not the sharedId)',
             "task_hint": (
@@ -229,7 +230,7 @@ def _target_properties(dataset_id: str, field: str) -> set[str]:
     return {
         "upr_state": {"state_reviewed"},
         "upr_recommendations": {"related_recommendations", "state_reviewed"},
-    }.get(dataset_id, {field})
+    }.get(base_dataset_id(dataset_id), {field})
 
 
 def _write_execute_sample(
@@ -441,11 +442,12 @@ def _subset_score(
 ) -> float | None:
     if not records:
         return None
-    if dataset_id.startswith("plan_") and dataset_id != "plan_all_fields":
+    base_id = base_dataset_id(dataset_id)
+    if base_id.startswith("plan_") and base_id != "plan_all_fields":
         return float(evaluation_module.aggregate_plan(records, fields)["accuracy"])
-    if dataset_id == "upr_state":
+    if base_id == "upr_state":
         return float(evaluation_module.aggregate_upr_state(records)["accuracy"])
-    if dataset_id == "upr_recommendations":
+    if base_id == "upr_recommendations":
         return float(evaluation_module.aggregate_upr(records)["f1"])
     return None
 
@@ -484,7 +486,8 @@ def run(
         dataset = _load_dataset(conn, dataset_id)
         template = _load_template(dataset)
         fields = list(dataset["target_schema"])
-        is_records = dataset_id == "upr_recommendations"
+        base_id = base_dataset_id(dataset_id)
+        is_records = base_id == "upr_recommendations"
         if not is_records and len(fields) != 1:
             raise SystemExit(f"This adapter supports single-field datasets, got {fields}")
         field = fields[0]
@@ -529,7 +532,10 @@ def run(
         if repair_enabled:
             try:
                 repair_split = repair.split_validation(
-                    dataset_id, train_records, validation_size=validation_size
+                    dataset_id,
+                    train_records,
+                    validation_size=validation_size,
+                    max_fraction=None if dataset_version(dataset_id) == V3 else 0.2,
                 )
             except ValueError as exc:
                 raise SystemExit(str(exc)) from exc
@@ -982,6 +988,8 @@ def run(
         "git_commit": _git_commit(),
         "evaluation_version": _evaluation_version(),
         "dataset_id": dataset_id,
+        "dataset_version": dataset["manifest"].get("dataset_version")
+        or dataset_version(dataset_id),
         "db": dataset["db"],
         "task_kind": "records" if is_records else "properties",
         "fields": fields,
@@ -1015,7 +1023,7 @@ def run(
         **({"repair": repair_spec} if repair_spec else {}),
         "candidate_list": {
             "included": include_country_list
-            and dataset_id in {"upr_state", "upr_recommendations"},
+            and base_id in {"upr_state", "upr_recommendations"},
             "count": candidate_count,
         },
         "execution": {
@@ -1046,6 +1054,8 @@ def run(
     config = {
         "condition": "no_title",
         "prompt_version": prompt_version,
+        "dataset_version": dataset["manifest"].get("dataset_version")
+        or dataset_version(dataset_id),
         "title_visible": title_visible,
         "target_property_visible_at_execution": not redact_target_metadata,
         "target_properties_redacted": sorted(redact_properties),

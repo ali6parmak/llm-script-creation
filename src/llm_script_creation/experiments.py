@@ -22,6 +22,7 @@ from .evaluation import (
     evaluate_upr_sample,
     evaluate_upr_state_sample,
 )
+from .task_ids import V2, V3, base_dataset_id, dataset_version, versioned_dataset_id
 
 
 def _dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
@@ -49,15 +50,16 @@ def _payload(doc_row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _aggregate(dataset_id: str, records: list[dict[str, Any]], fields: list[str]) -> dict[str, Any]:
-    if dataset_id == "upr_state":
+    base_id = base_dataset_id(dataset_id)
+    if base_id == "upr_state":
         return aggregate_upr_state(records)
-    if dataset_id == "upr_recommendations":
+    if base_id == "upr_recommendations":
         return aggregate_upr(records)
     return aggregate_plan(records, fields)
 
 
 def _primary_score(dataset_id: str, metrics: dict[str, Any]) -> float:
-    if dataset_id == "upr_recommendations":
+    if base_dataset_id(dataset_id) == "upr_recommendations":
         return float(metrics.get("f1", 0.0))
     return float(metrics.get("accuracy", 0.0))
 
@@ -89,10 +91,10 @@ def _run_split(
         if error:
             status = "error"
             details = {}
-        elif dataset_id == "upr_state":
+        elif base_dataset_id(dataset_id) == "upr_state":
             details = evaluate_upr_state_sample(gold, prediction)
             status = details["status"]
-        elif dataset_id == "upr_recommendations":
+        elif base_dataset_id(dataset_id) == "upr_recommendations":
             details = evaluate_upr_sample(gold, prediction)
             status = details["status"]
         else:
@@ -135,7 +137,7 @@ def run_baseline(dataset_id: str, limit: int | None = None) -> dict[str, Any]:
         )
         train_score = _primary_score(dataset_id, train_metrics)
         test_score = _primary_score(dataset_id, test_metrics)
-        metric_name = "f1" if dataset_id == "upr_recommendations" else "accuracy"
+        metric_name = "f1" if base_dataset_id(dataset_id) == "upr_recommendations" else "accuracy"
         primary = {
             "metric": metric_name,
             "train": train_score,
@@ -169,9 +171,13 @@ def run_baseline(dataset_id: str, limit: int | None = None) -> dict[str, Any]:
         }
 
         now = datetime.now(UTC).isoformat()
+        baseline_version = dataset_version(dataset_id) == V3
+        method_id = (
+            f"{baseline.method_id}_{V3}" if baseline_version else baseline.method_id
+        )
         method = {
-            "method_id": baseline.method_id,
-            "name": baseline.name,
+            "method_id": method_id,
+            "name": f"{baseline.name} (v3)" if baseline_version else baseline.name,
             "description": baseline.description,
             "type": "rule_based",
             "dataset_id": dataset_id,
@@ -188,10 +194,10 @@ def run_baseline(dataset_id: str, limit: int | None = None) -> dict[str, Any]:
             "final": primary,
         }
         runs.write_method(method)
-        run_id = runs.new_run_id(baseline.method_id, dataset_id, "train_test")
+        run_id = runs.new_run_id(method_id, dataset_id, "train_test")
         run = {
             "run_id": run_id,
-            "method_id": baseline.method_id,
+            "method_id": method_id,
             "dataset_id": dataset_id,
             "split": "train_test",
             "status": "completed",
@@ -219,13 +225,22 @@ def main(argv: list[str] | None = None) -> int:
         help="dataset id, or 'all' for every dataset with a registered baseline",
     )
     parser.add_argument("--limit", type=int, default=None, help="limit train samples (smoke)")
+    parser.add_argument(
+        "--split-version",
+        choices=[V2, V3],
+        default=V2,
+        help="dataset split version for --dataset all (default v2)",
+    )
     args = parser.parse_args(argv)
 
     if not CATALOG_PATH.exists():
         raise SystemExit("Catalog missing. Run `uv run build-datasets` first.")
 
     dataset_ids = (
-        [baseline.dataset_id for baseline in baselines.BASELINES]
+        [
+            versioned_dataset_id(baseline.dataset_id, args.split_version)
+            for baseline in baselines.BASELINES
+        ]
         if args.dataset == "all"
         else [args.dataset]
     )

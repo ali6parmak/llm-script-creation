@@ -32,6 +32,7 @@ from typing import Any
 from llm_script_creation import catalog, runs
 from llm_script_creation.admin_agent_adapter import sampling
 from llm_script_creation.configuration import REPORTS_DIR
+from llm_script_creation.task_ids import V2, V3, base_dataset_id, dataset_version
 
 CONDITION = {"title_visible": False, "no_metadata": True}
 
@@ -154,6 +155,7 @@ def _train_gold(dataset_id: str) -> dict[str, dict[str, Any]]:
 
 def _target_class(dataset_id: str, gold: dict[str, Any]) -> str:
     """A compact target stratum, only for describing what a sample covers."""
+    dataset_id = base_dataset_id(dataset_id)
     if dataset_id == "upr_recommendations":
         count = len(gold.get("recommendations") or [])
         if count < 150:
@@ -254,6 +256,7 @@ def _observation(
         "method_id": method["method_id"],
         "short_id": f"{str(spec.get('spec_hash') or '')[:8]}@{str(spec.get('created_at') or '')[11:19]}",
         "dataset_id": spec.get("dataset_id"),
+        "dataset_version": dataset_version(str(spec.get("dataset_id"))),
         "policy": (spec.get("sampling") or {}).get("policy"),
         "prompt_version": spec.get("prompt_version"),
         "created_at": spec.get("created_at"),
@@ -312,10 +315,12 @@ def _score_max(observations: list[dict[str, Any]]) -> float | None:
 
 
 def build_report(observations: list[dict[str, Any]]) -> str:
+    versions = sorted({str(obs.get("dataset_version")) for obs in observations})
     lines = ["# Admin-agent authoring-sample A/B", ""]
     lines.append(
         "Fixed condition: no title, `--no-metadata`, country list on for UPR. "
-        "One method per authoring run; scores are single runs, so treat ranges as noise, not CI."
+        "One method per authoring run; scores are single runs, so treat ranges as noise, not CI. "
+        f"Dataset versions in this report: {', '.join(versions)}."
     )
     lines.append("")
 
@@ -503,6 +508,12 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated sampling policies to include",
     )
     parser.add_argument(
+        "--dataset-version",
+        choices=["all", V2, V3],
+        default="all",
+        help="only include methods from one split version (default all; groups stay separate)",
+    )
+    parser.add_argument(
         "--since",
         default=None,
         help=(
@@ -537,7 +548,12 @@ def main(argv: list[str] | None = None) -> int:
         if not spec:
             continue
         if not explicit:
-            if spec.get("dataset_id") not in datasets:
+            if base_dataset_id(str(spec.get("dataset_id"))) not in datasets:
+                continue
+            if (
+                args.dataset_version != "all"
+                and dataset_version(str(spec.get("dataset_id"))) != args.dataset_version
+            ):
                 continue
             if (spec.get("sampling") or {}).get("policy") not in policies:
                 continue

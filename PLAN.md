@@ -311,6 +311,35 @@ recommendations, and gold uses sub-numbers when they share a paragraph number.
 - The split policy version and train ids are stored in every dataset manifest, method, and
   run.
 
+### 5.4 v3 split (`v3-200train`, additive)
+
+v3 is a second, independent experiment in the same catalog/artifacts root. It does not
+replace v2: v2 ids, rows, manifests, methods and runs are untouched.
+
+- **Ids:** every task gets a `_v3` dataset id (`plan_year_v3`, `upr_recommendations_v3`, ...)
+  in the same catalog; `task_ids.base_dataset_id` strips the suffix so task logic behaves
+  like the v2 task. The catalog `datasets` table also records `dataset_version` and
+  `split_policy_version`.
+- **Plan tasks:** 200 train documents (160 feedback + 40 frozen validation for repair),
+  test is every remaining v3-eligible document after v3-only cross-dataset isolation. New
+  seed 43, so v3 is not a superset of the v2 train ids.
+- **UPR tasks:** only 164/165 documents are eligible, so a literal 200-train split would
+  leave no test documents. v3 caps UPR train at 124 (84 feedback + 40 validation) and keeps
+  40/41 test documents. This is recorded in each manifest as `train_size` (requested 200)
+  vs `train_size_effective` (124) and `min_test: 40`.
+- **Cross-dataset isolation is version-scoped:** train ids in v2 never exclude v3 test
+  documents (and vice versa). Within v3, the original database-wide rule applies.
+- **Build:** `uv run build-datasets --skip-documents --split-version v3` is additive and
+  never resets the catalog. `--split-version v2` keeps the historical behaviour; v2 was
+  not rebuilt. A pre-v3 catalog backup is at
+  `artifacts/archive/catalog_v2_pre_v3_20261123.db` (gitignored).
+- **Absolute v3 scores are not comparable to v2** because the train/test sets differ.
+  Compare methods within v3; report v2 separately as a historical experiment.
+- **Repair:** the v3 experiment uses `--validation-size 40` for both control
+  (`--repair-rounds 0`) and repair (`--repair-rounds 3`). `repair.split_validation` accepts
+  `max_fraction=None` for v3 so the full 40-document slice is honored instead of the
+  historical 20% cap.
+
 ## 6. Representations and experimental factors
 
 The main question from `TASKS.md`: does providing segment position/size help?

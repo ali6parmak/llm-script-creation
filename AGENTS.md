@@ -103,10 +103,15 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
   where they exist; decades for years; code families for document codes;
   recommendation-count buckets + sub-numbered documents for UPR; rare strata first, then
   proportional fill; within-stratum order `sha256(seed:dataset:sharedId)`).
+- **Split policy `v3-200train` (seed 43, additive):** `*_v3` dataset ids in the same
+  catalog; Plan tasks have 200 train documents (160 feedback + 40 frozen validation), UPR
+  caps at 124 train (84 + 40) because only 164/165 documents are eligible, leaving 40/41
+  test. Build with `uv run build-datasets --skip-documents --split-version v3`; never
+  rebuild v2 in place. v3 absolute scores are not comparable to v2.
 - **Cross-dataset isolation:** any document selected as train in one dataset is excluded
-  from test in every other dataset of the same database. `upr_state` and
-  `upr_recommendations` share the same 50-document train pool. The split policy version and
-  train ids are stored in dataset manifests, methods, and runs.
+  from test in every other dataset of the same database **and split version**. `upr_state`
+  and `upr_recommendations` share the same train pool inside a version. The split policy
+  version and train ids are stored in dataset manifests, methods, and runs.
 - Inspect a sample of gold before writing a benchmark task; report known gold errors.
 
 ## Code conventions

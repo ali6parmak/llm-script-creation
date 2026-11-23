@@ -14,6 +14,7 @@ from .normalization import (
     normalize_text,
     strip_trailing_countries,
 )
+from .task_ids import base_dataset_id
 
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 DOC_CODE_RE = re.compile(r"\b[A-Z]{1,4}(?:/[A-Z0-9][A-Z0-9./-]*)+\b")
@@ -151,4 +152,5 @@ BASELINES: tuple[Baseline, ...] = (
 
 
 def for_dataset(dataset_id: str) -> Baseline | None:
-    return next((baseline for baseline in BASELINES if baseline.dataset_id == dataset_id), None)
+    base = base_dataset_id(dataset_id)
+    return next((baseline for baseline in BASELINES if baseline.dataset_id == base), None)
