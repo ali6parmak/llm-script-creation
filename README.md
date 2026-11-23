@@ -194,14 +194,14 @@ selector without touching the pages.
 ```
 artifacts/catalog.db              # documents, datasets, samples (SQLite)
 artifacts/states.json             # 195 UPR state/country candidates
-artifacts/datasets/<id>/          # manifest.json + samples.jsonl (train/test)
+artifacts/datasets/<id>/          # manifest.json + samples.jsonl (v2 and *_v3 train/test)
 artifacts/methods/<id>/           # method.json (input_spec, rounds), prompt, script, attempts/
 artifacts/runs/<run_id>/          # run.json, metrics.json, predictions.jsonl, script.py
 artifacts/runs/<run_id>/rounds/   # per-round script, feedback, messages, metrics, predictions
 ```
 
-Old dev-split and pre-focus v2 artifacts were removed; only the final v2 datasets, methods,
-and runs remain.
+The original v2 artifacts remain frozen. v3 additions live beside them (dataset ids end in
+`_v3`, method ids carry the version), so both experiments stay inspectable.
 
 The catalog is the document/sample index used by experiments and the viewer. MongoDB remains
 the source of truth; rebuild the catalog with `uv run build-datasets`.
@@ -229,7 +229,7 @@ src/llm_script_creation/
   text.py            text / TSV / JSON representations
   inspect_data.py    data report CLI (`inspect-data`)
   catalog.py         SQLite catalog for documents/datasets/samples
-  datasets.py        dataset specs, gold extraction, v2 stratified splits, builder
+  datasets.py        dataset specs, gold extraction, v2/v3 stratified splits, builder
   normalization.py   text/number/country normalization
   evaluation.py      Plan field metrics + UPR recommendation matching
   baselines.py       deterministic regex/heuristic baselines
@@ -248,7 +248,7 @@ data/                restored Mongo dumps (gitignored)
 
 ## Status
 
-The v2 benchmark is working end to end: v2-50train datasets, staged train/test baselines,
+The v2 benchmark is frozen and v3-200train is built beside it: staged train/test baselines,
 the LLM generate → repair → freeze → test pipeline, and a read-only adapter that evaluates
 the real Uwazi admin agent's nested extractor on the same Plan fields. Results are in
 [PLAN.md §14](PLAN.md#14-implementation-status-and-v2-results).

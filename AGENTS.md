@@ -176,13 +176,14 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 
 ## Current status / next tasks
 
-The v2 benchmark is built (v2-50train datasets, viewer, train/test baselines, repair loop,
-per-round artifacts). Results and known issues are in `PLAN.md` §14. Next work:
+The v2 benchmark is frozen and v3-200train is built beside it (same catalog, `_v3` ids,
+viewer split-version filter). v3 results are in `PLAN.md` §14: the authoring-sample A/B and
+repair matrix were rerun under v3. Next work:
 
-1. Fix the UPR recommendation segment script's state extraction (it returns no state on test
-   documents) and harden repair against invalid Python responses.
-2. Compare text vs segments/positions on the same dataset under the new loop and run
-   multiple generation attempts per method.
+1. Repeat the v3 large-gain repair cells (means, field document number, field month) — the
+   three seeds show large authoring variance.
+2. Compare text vs segments/positions on the same v3 split and run multiple generation
+   attempts per method.
 3. Add a plain-text/markdown run summary alongside the Streamlit viewer.
 4. Review gold noise (`upr_recommendations` sub-numbers, Plan field coverage) before strong
    conclusions.

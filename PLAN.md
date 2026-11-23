@@ -153,6 +153,11 @@ Document structure that matters for extraction:
 - `geolocation_geolocation` is empty. Exclude.
 - For UPR, the recommendation number is in the Recommendation entity `title`; the
   `paragraph_number` metadata property is mostly empty and should not be used as gold.
+- **UPR is a small-pool task:** only 165 `upr_state` and 164 `upr_recommendations` documents
+  have English segmentation and non-empty gold. A 200-train split would consume the whole
+  pool, so `v3-200train` caps UPR train at 124 (84 feedback + 40 validation) and keeps
+  40/41 documents for test. This cap is recorded in the manifests (`train_size`,
+  `train_size_effective`, `min_test`).
 
 ## 3. Research questions
 
