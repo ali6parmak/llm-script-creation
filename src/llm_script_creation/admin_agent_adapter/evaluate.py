@@ -190,6 +190,7 @@ def build_method(
     test_documents: int,
     created_at: str,
     prompt_version: str,
+    repair_rounds: int = 0,
 ) -> dict[str, Any]:
     return {
         "method_id": method_id,
@@ -207,6 +208,7 @@ def build_method(
         "test_documents": test_documents,
         "usage": usage,
         "created_at": created_at,
+        "repair_rounds": repair_rounds,
         "config": config,
         "final": primary,
         "script_hash": _hash(extractor_code),
@@ -225,6 +227,7 @@ def build_run(
     metrics: dict[str, Any],
     manifest: dict[str, Any],
     usage: dict[str, Any],
+    repair_rounds: int = 0,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -234,7 +237,7 @@ def build_run(
         "status": status,
         "created_at": created_at,
         "counts": counts,
-        "repair_rounds": 0,
+        "repair_rounds": repair_rounds,
         "rounds": [],
         "token_usage": usage,
         "split_policy_version": manifest.get("split_policy_version"),

@@ -203,6 +203,24 @@ def latest_run(method_id: str, run_index: list[dict[str, Any]]) -> dict[str, Any
     return runs[0] if runs else None
 
 
+def repair_rounds_value(
+    method: dict[str, Any], run: dict[str, Any] | None = None
+) -> int:
+    """Repair rounds after the initial authoring, with fallbacks for old artifacts."""
+    value = method.get("repair_rounds")
+    if value is not None:
+        return int(value)
+    if run and run.get("repair_rounds") is not None:
+        return int(run["repair_rounds"])
+    config = method.get("config") or {}
+    if config.get("repair_rounds_run") is not None:
+        return max(0, int(config["repair_rounds_run"]) - 1)
+    outcome = ((run or {}).get("metrics") or {}).get("repair") or {}
+    if outcome.get("rounds_run") is not None:
+        return max(0, int(outcome["rounds_run"]) - 1)
+    return 0
+
+
 def run_label(run: dict[str, Any]) -> str:
     return f"{run['run_id']} · {run['split']} · {run['status']}"
 
@@ -250,7 +268,7 @@ def method_card(
     run = latest_run(method["method_id"], run_index)
     train_value = metric_value(run, "train")
     test_value = metric_value(run, "test")
-    repair_rounds = method.get("repair_rounds", run.get("repair_rounds", 0) if run else 0)
+    repair_rounds = repair_rounds_value(method, run)
     examples = len(method.get("examples") or [])
     model = method.get("model") or "—"
     description = html.escape((method.get("description") or "")[:150])
@@ -710,7 +728,7 @@ def method_comparison_table(
         test = metric_value(run, "test")
         gap = metric_value(run, "gap")
         examples = method.get("examples") or []
-        repair_rounds = method.get("repair_rounds", run.get("repair_rounds", 0))
+        repair_rounds = repair_rounds_value(method, run)
         rows.append(
             {
                 "method": method.get("name", method["method_id"]),
@@ -798,7 +816,7 @@ def render_method_detail(
     stats[1].metric("Train (non-example)", fmt(primary.get("train_nonexample")))
     stats[2].metric("Test", fmt(primary.get("test")))
     stats[3].metric("Train→test gap", fmt(primary.get("gap")))
-    stats[4].metric("Repair rounds", metrics.get("repair_rounds", 0))
+    stats[4].metric("Repair rounds", repair_rounds_value(method, run))
     stats[5].metric("Test docs", metrics.get("test_documents", "—"))
     tokens = (metrics.get("token_usage") or {}).get("total_tokens")
     stats[6].metric("Tokens", f"{tokens:,}" if isinstance(tokens, int) else "—")

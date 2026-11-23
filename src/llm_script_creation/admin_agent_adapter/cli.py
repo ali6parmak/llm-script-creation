@@ -965,6 +965,8 @@ def run(
             "and never appeared in an authoring/repair prompt."
         )
 
+    repair_rounds_count = max(0, len(round_entries) - 1)
+    metrics["repair_rounds"] = repair_rounds_count
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
     prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
@@ -1112,6 +1114,7 @@ def run(
         test_documents=test_count,
         created_at=now,
         prompt_version=prompt_version,
+        repair_rounds=repair_rounds_count,
     )
     method["input_spec"] = {
         "representation": "text",
@@ -1142,6 +1145,7 @@ def run(
         metrics=metrics,
         manifest=dataset["manifest"],
         usage=usage,
+        repair_rounds=repair_rounds_count,
     )
     runs.write_run(run, scored_records, metrics, prompt=task_prompt, script=code)
 

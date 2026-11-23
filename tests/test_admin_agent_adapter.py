@@ -338,6 +338,43 @@ def test_spec_digest_is_stable_and_sensitive_to_sampling() -> None:
     assert cli._spec_digest(base) != cli._spec_digest(different)
 
 
+def test_build_method_and_run_record_repair_rounds() -> None:
+    method = evaluate.build_method(
+        method_id="m1",
+        name="M",
+        description="D",
+        dataset_id="plan_year",
+        task="numeric",
+        model="model",
+        extractor_code="def extract(text, ctx):\n    return None\n",
+        prompt="task",
+        manifest={"split_policy_version": "v2"},
+        config={},
+        usage={},
+        primary={"train": 0.5, "test": 0.4, "gap": 0.1},
+        train_documents=1,
+        test_documents=1,
+        created_at="now",
+        prompt_version="v",
+        repair_rounds=2,
+    )
+    run = evaluate.build_run(
+        run_id="r1",
+        method_id="m1",
+        dataset_id="plan_year",
+        status="completed",
+        created_at="now",
+        counts={},
+        metrics={},
+        manifest={"split_policy_version": "v2"},
+        usage={},
+        repair_rounds=2,
+    )
+
+    assert method["repair_rounds"] == 2
+    assert run["repair_rounds"] == 2
+
+
 def test_write_method_persists_spec(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(runs, "METHODS_DIR", tmp_path)
     spec = {"spec_version": 1, "spec_hash": "abc123", "sampling": {"selected_shared_ids": ["a"]}}
