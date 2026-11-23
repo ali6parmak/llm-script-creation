@@ -514,6 +514,11 @@ def main(argv: list[str] | None = None) -> int:
         help="only include methods from one split version (default all; groups stay separate)",
     )
     parser.add_argument(
+        "--include-repair",
+        action="store_true",
+        help="also include opt-in repair methods (excluded by default: same policy arm)",
+    )
+    parser.add_argument(
         "--since",
         default=None,
         help=(
@@ -548,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
         if not spec:
             continue
         if not explicit:
+            if (spec.get("repair") or {}).get("enabled") and not args.include_repair:
+                continue
             if base_dataset_id(str(spec.get("dataset_id"))) not in datasets:
                 continue
             if (
