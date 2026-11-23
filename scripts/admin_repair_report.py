@@ -94,24 +94,53 @@ def _baseline_rows(
     return rows
 
 
+def _deterministic_baselines(version: str | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for method in runs.list_methods():
+        if method.get("type") != "rule_based":
+            continue
+        dataset_id = str(method.get("dataset_id"))
+        if version is not None and dataset_version(dataset_id) != version:
+            continue
+        run = _latest_run(str(method.get("method_id")))
+        if run is not None:
+            rows.append((method, run))
+    return sorted(rows, key=lambda item: item[0]["dataset_id"])
+
+
 def build_report(
     repair_methods: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
     baseline: dict[str, list[dict[str, Any]]],
     version_label: str = "all versions",
+    deterministic: list[tuple[dict[str, Any], dict[str, Any]]] | None = None,
 ) -> str:
+    validation_sizes = sorted(
+        {
+            int((spec.get("repair") or {}).get("validation_size") or 0)
+            for spec, *_ in repair_methods
+        }
+    )
+    feedback_sizes = sorted(
+        {
+            len((spec.get("repair") or {}).get("feedback_pool_ids") or [])
+            for spec, *_ in repair_methods
+        }
+    )
     lines = [
         "# Admin-agent repair loop",
         "",
         f"Dataset versions in this report: {version_label}.",
         "",
-        "Opt-in loop: 40-document feedback pool, frozen stratified validation slice "
-        "(never sent to authoring), 2-3 failures per round, best round on validation, "
-        "test executed once at the end.",
+        "Opt-in loop: a frozen stratified validation slice (never sent to authoring) is "
+        "scored after every round, 2-3 failures from the feedback pool are fed back, the "
+        "best round on validation wins, and test is executed once at the end. "
+        f"Validation documents: {', '.join(map(str, validation_sizes))}; "
+        f"feedback-pool sizes: {', '.join(map(str, feedback_sizes))}.",
         "",
         "## Task matrix",
         "",
-        "Control = same 40/10 holdout with `--repair-rounds 0`; repair = 3 rounds. "
-        "Means over the runs shown (n is small; treat deltas as a first pass).",
+        "Control = the same feedback/validation holdout with `--repair-rounds 0`; repair = "
+        "3 rounds. Means over the runs shown (n is small; treat deltas as a first pass).",
         "",
         "| Dataset | Control test | Repair test | Δ mean | Best rounds |",
         "|---|---:|---:|---:|---|",
@@ -148,6 +177,24 @@ def build_report(
             f"{_fmt(repair_mean)} (n={len(repair_values)}) | {_fmt(delta)} | "
             f"{', '.join(best_rounds) or '—'} |"
         )
+    if deterministic:
+        lines += [
+            "",
+            "## Deterministic baselines (same split version)",
+            "",
+            "Rule-based baselines run on the v3 train/test split, shown for orientation. "
+            "They are not LLM scripts and are not part of the repair comparison.",
+            "",
+            "| Dataset | Metric | Train | Test |",
+            "|---|---|---:|---:|",
+        ]
+        for method, run in deterministic:
+            primary = (run.get("metrics") or {}).get("primary") or {}
+            lines.append(
+                f"| {method.get('dataset_id')} | {primary.get('metric')} | "
+                f"{_fmt(primary.get('train'))} | {_fmt(primary.get('test'))} |"
+            )
+
     lines += [
         "",
         "## Repair runs",
@@ -221,21 +268,26 @@ def build_report(
     lines += [
         "## Baseline comparison (agent arm, no repair, same no-metadata condition)",
         "",
-        "| Dataset | Mode | Baseline mean [min–max] | Repair test | Δ |",
+        "| Dataset | Mode | No-repair agent baseline mean [min–max] | Repair/control test mean | Δ |",
         "|---|---|---:|---:|---:|",
     ]
+    grouped_repairs: dict[tuple[str, str], list[float | None]] = {}
     for spec, run, _outcome, _attempts in repair_methods:
-        dataset_id = str(spec.get("dataset_id"))
+        mode = "control" if not (spec.get("repair") or {}).get("rounds_requested") else "repair"
+        key = (str(spec.get("dataset_id")), mode)
+        grouped_repairs.setdefault(key, []).append(
+            (run.get("metrics") or {}).get("primary", {}).get("test")
+        )
+    for (dataset_id, mode), repair_values in sorted(grouped_repairs.items()):
         values = [row.get("test") for row in baseline.get(dataset_id, [])]
         mean = _mean(values)
-        test = (run.get("metrics") or {}).get("primary", {}).get("test")
-        delta = None if mean is None or test is None else test - mean
+        repair_mean = _mean(repair_values)
+        delta = None if mean is None or repair_mean is None else repair_mean - mean
         low = min(values) if values else None
         high = max(values) if values else None
-        mode = "control" if not (spec.get("repair") or {}).get("rounds_requested") else "repair"
         lines.append(
             f"| {dataset_id} | {mode} | {_fmt(mean)} [{_fmt(low)}–{_fmt(high)}] (n={len(values)}) | "
-            f"{_fmt(test)} | {_fmt(delta)} |"
+            f"{_fmt(repair_mean)} (n={len(repair_values)}) | {_fmt(delta)} |"
         )
     lines.append("")
 
@@ -318,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             version_filter,
         ),
         args.dataset_version,
+        _deterministic_baselines(version_filter),
     )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

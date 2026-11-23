@@ -138,6 +138,24 @@ There is no `dev` split. Each dataset has:
 `upr_state` and `upr_recommendations` share the same 50-document train pool. Seed is 42 and
 the policy version (`v2-50train`) is stored in dataset manifests, methods, and runs.
 
+## Split policy `v3-200train` (additive)
+
+v3 lives beside v2 in the same catalog/artifacts root and never replaces it. Dataset ids get
+a `_v3` suffix (`plan_year_v3`, ...); task logic strips the suffix and treats them like their
+v2 tasks. Build it without rebuilding v2:
+
+```bash
+uv run build-datasets --skip-documents --split-version v3
+```
+
+- Plan tasks: 200 train documents (160 feedback + 40 frozen repair validation), new seed 43.
+- UPR tasks: the pools contain only 164/165 documents, so v3 caps train at 124
+  (84 feedback + 40 validation) and keeps 40/41 documents for test.
+- Cross-dataset isolation is scoped to the split version: v2 train ids do not exclude v3 test
+  documents (and vice versa).
+- Absolute v3 scores are not comparable to v2. Compare methods within v3 and report v2 as a
+  separate historical experiment. The viewer has a "Split version" filter.
+
 ## Repair loop
 
 The LLM pipeline starts from 2 train examples, runs the script over all 50 train documents,

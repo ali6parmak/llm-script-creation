@@ -936,6 +936,78 @@ the full pool and hold out a separate validation/evaluation stream rather than s
 20% from a small training set. Leak check: no validation shared_id appeared in any stored
 round prompt (`scripts/admin_repair_report.py`).
 
+### v3 experiment (2026-11-23, 200-train split)
+
+Built additively with `uv run build-datasets --skip-documents --split-version v3`; v2 datasets,
+rows, manifests, methods and runs were verified byte-identical before/after (snapshot in
+`work/v3/v2_snapshot_pre_v3.json`, catalog backup in
+`artifacts/archive/catalog_v2_pre_v3_20261123.db`). Method ids carry the dataset version, so
+v3 methods coexist with v2 in `artifacts/methods` and the viewer filters by split version.
+
+**Datasets.** All Plan tasks: 200 train (160 feedback + 40 frozen validation), test is every
+remaining v3-eligible document after v3-only cross-dataset isolation. UPR: 124 train
+(84 feedback + 40 validation) and 40/41 test, because the pools contain only 164/165
+documents; the manifest records requested 200 vs effective 124. `plan_body_v3` and
+`plan_all_fields_v3` were built but are not run by the adapter (`plan_body` skipped, multi-field
+unsupported).
+
+**Deterministic baselines (v3).** Rerun before comparing:
+
+| Dataset | Metric | Train | Test |
+|---|---|---:|---:|
+| `plan_year_v3` | accuracy | 0.905 | 0.944 |
+| `plan_document_code_v3` | accuracy | 0.890 | 0.956 |
+| `upr_state_v3` | accuracy | 1.000 | 0.976 |
+| `upr_recommendations_v3` | F1 | 0.905 | 0.862 |
+
+**Sampling A/B (v3, 3 authoring runs/arm, no title + `--no-metadata`).** Agent runs see all
+200 (124 UPR) train docs; hybrid sees a deterministic 12-document coverage selection.
+Full tables in `reports/admin_sampling_ab.md`.
+
+| Dataset | Metric | `agent` | `hybrid` (12) | Δ mean |
+|---|---|---:|---:|---:|
+| `plan_document_type_v3` | accuracy | **0.905** [0.893–0.929] | 0.805 [0.610–0.915] | −0.100 |
+| `plan_year_v3` | accuracy | 0.915 [0.863–0.943] | **0.941** [0.939–0.944] | +0.026 |
+| `upr_recommendations_v3` | F1 | 0.948 [0.941–0.955] | 0.948 [0.935–0.957] | 0.000 |
+
+Hybrid again hurts document type (the 0.610 outlier repeats the v2 failure mode: it fits the
+12-doc class mix, resolving 474 test docs wrong). At 200 train it no longer hurts year: the
+hybrid arm is tight at 0.939–0.944 while the agent arm has a 0.863 abstention-heavy outlier.
+UPR recommendations tie, with hybrid cheaper (mean 8.7 vs 12.0 requests; 0.96M vs 1.48M
+tokens). The v2 claim that static coverage sampling is an accuracy loss therefore replicates
+for document type but not for year/UPR at the larger split.
+
+**Repair matrix (v3, control = `--repair-rounds 0`, repair = 3 rounds, both 40-doc
+validation).** One control + one repair run per task; the three large-gain tasks have three
+repair seeds (independent authoring runs on the same 200/160/40 split). Full per-round,
+baseline and leak-check tables in `reports/admin_repair.md`.
+
+| Dataset | Control test | Repair mean (seeds) | Δ |
+|---|---:|---:|---:|
+| `plan_means_of_adoption_v3` | 0.482 | **0.723** (0.775 · 0.846 · 0.550) | +0.241 |
+| `plan_document_type_v3` | 0.878 | **0.971** | +0.093 |
+| `plan_field_document_number_v3` | 0.683 | **0.734** (0.724 · 0.681 · 0.797) | +0.051 |
+| `plan_field_month_v3` | 0.848 | **0.883** (0.902 · 0.908 · 0.838) | +0.035 |
+| `upr_recommendations_v3` (F1) | 0.944 | **0.967** | +0.023 |
+| `plan_legal_status_v3` | 0.976 | 0.986 | +0.010 |
+| `plan_document_code_v3` | 0.979 | 0.988 | +0.009 |
+| `plan_year_v3` | 0.939 | 0.947 | +0.007 |
+| `upr_state_v3` | 1.000 | 1.000 | 0.000 |
+
+The v2 mechanism still holds — repair pays where the first script abstains — but the larger
+feedback pool moves the controls up, so most deltas shrink: means +0.431→+0.241, field
+document number +0.128→+0.051, field month +0.103→+0.035, UPR recommendations
++0.053→+0.023. Document type is the exception, where repair now gains +0.093 (v2 +0.044).
+Near-ceiling tasks stay neutral. Leak check: no validation shared_id appears in any stored
+round prompt.
+
+**Caveats.** v3 is a different experiment: absolute scores are **not comparable to v2**.
+A/B has three runs per arm; the repair matrix still has one control and one repair per task
+except the three seeded tasks, and the seeds show large authoring variance (means 0.550–0.846,
+field document number 0.681–0.797, field month 0.838–0.908). Treat the mean deltas as a first
+pass, and compare methods within v3 only. UPR is a capped small-pool split, not a 200-train
+split. The 40-doc validation slice reduces but does not eliminate saturation/plateau effects.
+
 ### What the v2 numbers show
 
 - **The excerpt fix mattered a lot.** An earlier v2 pass centered prompt/repair excerpts on

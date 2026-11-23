@@ -382,7 +382,7 @@ def build_report(observations: list[dict[str, Any]]) -> str:
     lines += [
         "## Selected-sample structure",
         "",
-        "Distinct values among the documents offered to the extractor (agent arm: all 50).",
+        "Distinct values among the documents offered to the extractor (agent arm: the whole train split).",
         "",
     ]
     for obs in sorted(observations, key=lambda item: (item["dataset_id"], item["policy"], item["created_at"])):
