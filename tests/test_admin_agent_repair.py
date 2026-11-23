@@ -196,6 +196,15 @@ def test_upr_state_failure_example_uses_state_fields() -> None:
     assert "Algeria" in examples[0]["detail"]
 
 
+def test_is_improvement_uses_validation_then_feedback_as_tiebreak() -> None:
+    assert repair.is_improvement(0.8, 0.7, 0.9, 0.9)
+    assert not repair.is_improvement(0.7, 0.8, 1.0, 0.5)
+    assert repair.is_improvement(0.8, 0.8, 0.9, 0.8)
+    assert not repair.is_improvement(0.8, 0.8, 0.8, 0.8)
+    assert repair.is_improvement(0.8, None, None, None)
+    assert not repair.is_improvement(None, 0.8, 1.0, 0.5)
+
+
 def test_repair_prompt_contains_code_and_examples_but_no_validation() -> None:
     examples = [
         {

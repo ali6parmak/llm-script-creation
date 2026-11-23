@@ -751,6 +751,7 @@ def run(
         ]
         best_index = 0
         best_validation = validation_score
+        best_feedback = feedback_score
         patience = 0
         stop_reason = "max_rounds"
         for round_index in range(1, repair_rounds + 1):
@@ -800,12 +801,12 @@ def run(
                     validation_score,
                 )
             )
-            improved = validation_score is not None and (
-                best_validation is None or validation_score > best_validation + 1e-9
-            )
-            if improved:
+            if repair.is_improvement(
+                validation_score, best_validation, feedback_score, best_feedback
+            ):
                 best_index = len(rounds) - 1
                 best_validation = validation_score
+                best_feedback = feedback_score
                 patience = 0
             else:
                 patience += 1
@@ -830,6 +831,7 @@ def run(
             "strata": repair_split.strata,
             "best_round": best_index,
             "best_validation": best_validation,
+            "best_feedback": best_feedback,
             "stop_reason": stop_reason,
             "round_scores": [
                 {

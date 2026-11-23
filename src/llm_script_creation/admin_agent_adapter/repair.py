@@ -349,6 +349,32 @@ def select_failures(
     return examples
 
 
+def is_improvement(
+    validation: float | None,
+    best_validation: float | None,
+    feedback: float | None,
+    best_feedback: float | None,
+    tolerance: float = 1e-9,
+) -> bool:
+    """Validation is the guardrail; a tie is broken by feedback-score gain.
+
+    A small validation slice can saturate at 1.0, in which case validation can
+    never distinguish rounds. When it ties, prefer the round that fixed more
+    feedback-pool errors; otherwise keep the earlier (less patched) round.
+    """
+    if validation is None:
+        return False
+    if best_validation is None:
+        return True
+    if validation > best_validation + tolerance:
+        return True
+    if abs(validation - best_validation) <= tolerance:
+        return feedback is not None and (
+            best_feedback is None or feedback > best_feedback + tolerance
+        )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Repair prompt
 
@@ -413,6 +439,7 @@ __all__ = [
     "DEFAULT_VALIDATION_SIZE",
     "RepairSplit",
     "build_repair_prompt",
+    "is_improvement",
     "select_failures",
     "split_validation",
 ]
