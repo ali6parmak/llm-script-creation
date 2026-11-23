@@ -754,10 +754,12 @@ New UPR recommendation detail (with country list): P 0.971 / R 0.971 / **F1 0.97
 archived. The authoring-sample A/B is done (below): restricting the universe to 12 coverage
 documents helps UPR recommendations slightly and costs less authoring, but hurts Plan
 classification because the extractor calibrates on the biased sample. The opt-in repair loop
-is implemented and had a neutral first pass: 10-document validation is too small (it saturates
-or swings), most shown failures were singleton/gold-ambiguous, and holding out 10 of 50 docs
-removes scarce learning examples. Next: systematic-only failure families, a larger/cross-val
-validation signal, and production holdouts that do not shrink the authoring pool. The full
+was then run on all supported single-field tasks (except `plan_body`): it is neutral on
+near-ceiling tasks (`plan_year`, `plan_document_code`, `upr_state`) and clearly positive
+where the first script abstains (`plan_means_of_adoption` +0.43, `plan_field_document_number`
++0.13, `plan_field_month` +0.10, UPR recommendations +0.05, legal status +0.04, document type
++0.04 on the 40/10 control). Next: repeat seeds on the large-gain tasks, feed only
+systematic failure families, and use a larger/cross-validated validation signal. The full
 `GenerateScriptUseCase` bulk-script path remains out of scope.
 
 ### Authoring-sample policies (2026-11-23)
@@ -857,39 +859,53 @@ feedback/validation ids and per-round scores separately from the spec hash (so t
 is reproducible and the outcome does not change the method id). `--replay` execute works on
 the final frozen script; `--replay-mode author` refuses repair methods.
 
-**First-pass results** (one or two runs per cell; controls are `--repair-rounds 0`, i.e. the
-same 40/10 holdout with no repair; baseline is the 3-run `agent` A/B above):
+**Results on all supported tasks** (one run per cell except `plan_document_type` and
+`plan_year`; controls are `--repair-rounds 0`, i.e. the same 40/10 holdout with no repair.
+`plan_all_fields` is multi-field and unsupported by this adapter; `plan_body` is skipped.)
 
-| Dataset | 50-doc baseline | 40/10 control | 40/10 repair |
+| Dataset | 40/10 control | 40/10 repair | Δ |
 |---|---:|---:|---:|
-| `plan_year` | 0.925 [0.920–0.927] | **0.932** | 0.932 · 0.935 |
-| `plan_document_type` | **0.919** [0.889–0.953] | 0.834 | 0.858 |
+| `plan_means_of_adoption` | 0.222 | **0.653** | +0.431 |
+| `plan_field_document_number` | 0.684 | **0.812** | +0.128 |
+| `plan_field_month` | 0.778 | **0.881** | +0.103 |
+| `upr_recommendations` (F1) | 0.928 | **0.981** | +0.053 |
+| `plan_document_type` | 0.834 | **0.878** (0.858 · 0.899)¹ | +0.044 |
+| `plan_legal_status` | 0.925 | **0.963** | +0.038 |
+| `upr_state` | 0.991 | **1.000** | +0.009 |
+| `plan_document_code` | **0.975** | 0.974 | −0.001 |
+| `plan_year` | 0.932 | 0.932 · 0.935 | +0.001 |
 
-Round transcripts show why the loop did not move the score:
+¹ The first `plan_document_type` repair run (0.858) predates the feedback tie-break and kept
+round 0; the post-fix run picked round 2 and scored 0.899. Both are reported in
+`reports/admin_repair.md`; the matrix means them.
 
-- `plan_year`: validation was saturated at **1.0** from round 0, so no later round could win
-  on validation. Feedback stayed at 0.925 across rounds even though the shown failures
-  changed (`1977`, `1980`, `2015`), i.e. revisions swapped errors rather than fixing them.
-  The tie-break on feedback score had nothing to select. The repair run matched the control
-  exactly (0.932).
-- `plan_document_type`: feedback improved 0.975→1.000 but validation fell 0.80→0.70, so the
-  loop correctly kept round 0. The recurring failure was a single `missing:Resolution` family.
-  Test was 0.834 (control) / 0.858 (repair) vs 0.919 with all 50 docs: holding out 10 removes
-  rare authoring examples (the validation slice contained the only ExCom/General Comment
-  examples in the 40-doc pool) and that costs more than repair recovers.
-- Leak check: no validation shared_id appeared in any round prompt (checked by
-  `scripts/admin_repair_report.py` over stored attempts).
+**The pattern is clear: repair helps where the first script abstains.** Control missing
+predictions vs repair: `plan_means_of_adoption` 1,687 → 0; `plan_field_document_number`
+347 → 74; `plan_field_month` 200 → 6; `upr_recommendations` partial docs 38 → 2. On
+near-ceiling tasks there is little room: `plan_document_code` engaged through round 3
+(feedback 0.85→0.975) but test stayed flat; `plan_year` and `upr_state` had validation
+saturated at 1.0, so the loop stopped at round 0.
 
-**Findings.** The orchestration is sound and cheap; the limiting factor is signal quality.
-A 10-document validation slice is too small for model selection (saturates or swings), and
-most failures shown were singleton, possibly gold-ambiguous cases, so the agent had nothing
-systematic to generalise. At 50 train documents, holding out 10 also removes scarce learning
-examples.
+Round selection (best round > 0) worked for `plan_means_of_adoption`, `plan_legal_status`,
+`plan_document_type`, `plan_field_month`, `plan_field_document_number`, `plan_document_code`
+and `upr_recommendations` (rounds 1–3); `plan_year` and `upr_state` kept round 0. Without the
+feedback tie-break, a saturated 10-doc validation slice cannot select a later round at all —
+that was the main difference between the first pass and this matrix.
 
-**Next:** only feed failure families that occur in at least two documents and are grounded in
+**Caveats.** One run per control/repair cell (two repair runs for `plan_document_type` and
+`plan_year`); authoring is stochastic, so the large deltas (means, document number, month)
+are a first pass and should be repeated. The 40/10 control is the right comparator, not the
+50-doc A/B baseline, because holding out 10 changes the learning set; for the three tasks
+with both (`plan_document_type`, `plan_year`, `upr_recommendations`), repair recovers the
+holdout cost and can exceed the 50-doc baseline on year/UPR, while document type remains
+slightly below it.
+
+**Next:** repeat the large-gain tasks (means, field document number, field month) with 2–3
+seeds; only feed failure families that occur in at least two documents and are grounded in
 the text; use a larger validation slice or cross-validation; in production, keep authoring on
 the full pool and hold out a separate validation/evaluation stream rather than subtracting
-20% from a small training set.
+20% from a small training set. Leak check: no validation shared_id appeared in any stored
+round prompt (`scripts/admin_repair_report.py`).
 
 ### What the v2 numbers show
 

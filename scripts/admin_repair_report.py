@@ -100,6 +100,48 @@ def build_report(
         "(never sent to authoring), 2-3 failures per round, best round on validation, "
         "test executed once at the end.",
         "",
+        "## Task matrix",
+        "",
+        "Control = same 40/10 holdout with `--repair-rounds 0`; repair = 3 rounds. "
+        "Means over the runs shown (n is small; treat deltas as a first pass).",
+        "",
+        "| Dataset | Control test | Repair test | Δ mean | Best rounds |",
+        "|---|---:|---:|---:|---|",
+    ]
+    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for spec, run, _outcome, _attempts in repair_methods:
+        dataset_id = str(spec.get("dataset_id"))
+        mode = "control" if not (spec.get("repair") or {}).get("rounds_requested") else "repair"
+        groups.setdefault(dataset_id, {"control": [], "repair": []})[mode].append(run)
+    for dataset_id, modes in sorted(groups.items()):
+        control_values = [
+            (run.get("metrics") or {}).get("primary", {}).get("test")
+            for run in modes["control"]
+        ]
+        repair_values = [
+            (run.get("metrics") or {}).get("primary", {}).get("test")
+            for run in modes["repair"]
+        ]
+        control_mean = _mean(control_values)
+        repair_mean = _mean(repair_values)
+        delta = (
+            None
+            if control_mean is None or repair_mean is None
+            else repair_mean - control_mean
+        )
+        best_rounds = [
+            str((spec.get("repair_outcome") or {}).get("best_round"))
+            for spec, run, outcome, _attempts in repair_methods
+            if spec.get("dataset_id") == dataset_id
+            and (spec.get("repair") or {}).get("rounds_requested")
+        ]
+        lines.append(
+            f"| {dataset_id} | {_fmt(control_mean)} (n={len(control_values)}) | "
+            f"{_fmt(repair_mean)} (n={len(repair_values)}) | {_fmt(delta)} | "
+            f"{', '.join(best_rounds) or '—'} |"
+        )
+    lines += [
+        "",
         "## Repair runs",
         "",
         "| Dataset | Mode | Method | Val docs | Rounds | Best | Stop | Test | Train | Hit/wrong/missing |",
