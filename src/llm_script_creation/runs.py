@@ -38,11 +38,14 @@ def write_method(
     prompt: str | None = None,
     script: str | None = None,
     attempts: Iterable[dict[str, Any]] = (),
+    spec: dict[str, Any] | None = None,
 ) -> Path:
     method_id = method["method_id"]
     directory = METHODS_DIR / method_id
     directory.mkdir(parents=True, exist_ok=True)
     _dump(directory / "method.json", method)
+    if spec is not None:
+        _dump(directory / "spec.json", spec)
     if prompt is not None:
         (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
     if script is not None:

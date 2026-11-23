@@ -643,6 +643,37 @@ samples stats and a clipped tool-call transcript. The run records our Plan metri
 agent's own `extraction_eval` score, and per-document predictions. Nothing is written to
 MongoDB.
 
+**Self-contained methods and replay (2026-11-23).** Every method created from now on writes
+a `spec.json` next to `method.json`, `prompt.txt` and `script.py`. The spec records everything
+needed to identify and reproduce the method:
+
+- dataset, fields, real Uwazi property, task kind (properties vs records);
+- model id/base URL, prompt text hash/chars, prompt version;
+- condition: title visibility, metadata mode, geometry, target-property redaction;
+- sampling policy and the **exact selected train shared_ids**;
+- candidate-list inclusion/count, execution property names/key map/score policy;
+- split policy version, adapter version, git commit, evaluation/normalization file hashes;
+- max author requests.
+
+Method ids now end with a short **spec hash** (e.g. `..._0237e882`), so a different prompt,
+condition or selected sample set is a different method. If the same method id already exists,
+the new run gets a `-r<timestamp>` suffix instead of overwriting the method. Every method
+directory is therefore immutable; new attempts add methods/runs, never replace old logic.
+
+Replay:
+
+```bash
+# exact: run the stored frozen script under the stored condition
+uv run benchmark-admin-agent --replay <method_id>
+
+# re-author: same stored prompt + same selected train ids, new stochastic extractor
+uv run benchmark-admin-agent --replay <method_id> --replay-mode author
+```
+
+`--replay-mode author` writes a **new method** (`<old_id>-r<timestamp>`) with `replay_of`
+recorded in its spec; the original is untouched. Methods created before this change have no
+`spec.json` and cannot be replayed, but their prompt/script/predictions are still on disk.
+
 **Results (v2-50train, seed 42, 2026-11-20):**
 
 | Dataset | Train (50) | Test | Gap | Coverage (test) | Admin eval | Test statuses | Author requests | Tokens |

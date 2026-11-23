@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from llm_script_creation import runs
 from llm_script_creation.admin_agent_adapter import evaluate, prompt, records
 
 
@@ -319,3 +320,37 @@ def test_no_metadata_prompt_condition() -> None:
     assert "`ctx['metadata']` is EMPTY" in task
     assert "Do not read any metadata" in task
     assert "target property `year` is REMOVED" not in task
+
+
+def test_spec_digest_is_stable_and_sensitive_to_sampling() -> None:
+    from llm_script_creation.admin_agent_adapter import cli
+
+    base = {
+        "dataset_id": "plan_year",
+        "prompt_sha256": "abc",
+        "condition": {"title_visible": False, "geometry": False},
+        "sampling": {"policy": "agent_all_train", "selected_shared_ids": ["a", "b"]},
+    }
+    same = {**base, "sampling": {"policy": "agent_all_train", "selected_shared_ids": ["a", "b"]}}
+    different = {**base, "sampling": {"policy": "agent_all_train", "selected_shared_ids": ["a", "c"]}}
+
+    assert cli._spec_digest(base) == cli._spec_digest(same)
+    assert cli._spec_digest(base) != cli._spec_digest(different)
+
+
+def test_write_method_persists_spec(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runs, "METHODS_DIR", tmp_path)
+    spec = {"spec_version": 1, "spec_hash": "abc123", "sampling": {"selected_shared_ids": ["a"]}}
+
+    runs.write_method(
+        {"method_id": "m1", "name": "M"},
+        prompt="task",
+        script="def extract(text, ctx):\n    return None\n",
+        spec=spec,
+    )
+
+    saved = (tmp_path / "m1" / "spec.json").read_text(encoding="utf-8")
+    assert '"spec_hash": "abc123"' in saved
+    assert (tmp_path / "m1" / "method.json").exists()
+    assert (tmp_path / "m1" / "prompt.txt").exists()
+    assert (tmp_path / "m1" / "script.py").exists()

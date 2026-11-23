@@ -89,6 +89,21 @@ uv pip install --target work/admin_agent_extra \
   "rapidfuzz==3.14.6" "python-dateutil==2.9.0.post0"
 ```
 
+### Self-contained methods and replay
+
+New methods write a `spec.json` next to `method.json`: prompt hash/version, condition, selected
+train shared_ids, sampling policy, candidate-list flags, model, split policy, adapter/git
+version, and evaluator hashes. Method ids include a short spec hash; an existing id is never
+overwritten (a `-r<timestamp>` suffix is added). Replay a method without touching its artifacts:
+
+```bash
+uv run benchmark-admin-agent --replay <method_id>                  # frozen script, exact
+uv run benchmark-admin-agent --replay <method_id> --replay-mode author  # new method, same inputs
+```
+
+Methods created before this change lack `spec.json` and cannot be replayed, but their prompt,
+script and predictions remain available.
+
 The method type is `admin_agent_extractor`; artifacts land under
 `artifacts/methods/<method_id>/` (task prompt, extractor source, attempt with the admin
 agent's tool-call transcript) and `artifacts/runs/<run_id>/` (predictions, our dataset

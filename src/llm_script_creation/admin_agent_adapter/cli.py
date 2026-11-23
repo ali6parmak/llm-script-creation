@@ -17,6 +17,8 @@ Phase 1 covers single Plan fields (``plan_year`` first).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -28,6 +30,8 @@ from typing import Any
 from bson import ObjectId
 
 from .. import catalog, runs
+from .. import evaluation as evaluation_module
+from .. import normalization as normalization_module
 from ..configuration import CATALOG_PATH, WORK_DIR
 from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
 from ..normalization import load_states
@@ -49,6 +53,47 @@ TITLE_VISIBLE = False
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _git_commit() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(_repo_root()),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed.stdout.strip() or None
+    except OSError:
+        return None
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("llm-script-creation")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _evaluation_version() -> dict[str, str | None]:
+    return {
+        "evaluation": _file_digest(Path(evaluation_module.__file__)),
+        "normalization": _file_digest(Path(normalization_module.__file__)),
+    }
+
+
+def _spec_digest(core: dict[str, Any]) -> str:
+    """Stable digest of a method spec's reproducibility-critical content."""
+    payload = json.dumps(core, sort_keys=True, ensure_ascii=False, default=str).encode()
+    return hashlib.sha256(payload).hexdigest()[:12]
 
 
 def _load_dataset(conn: Any, dataset_id: str) -> dict[str, Any]:
@@ -100,7 +145,13 @@ def _rows(conn: Any, dataset_id: str, split: str, limit: int | None) -> list[dic
     return rows[:limit] if limit is not None else rows
 
 
-def _record(conn: Any, dataset: dict[str, Any], sample: dict[str, Any], template: dict[str, Any]) -> dict[str, Any] | None:
+def _record(
+    conn: Any,
+    dataset: dict[str, Any],
+    sample: dict[str, Any],
+    template: dict[str, Any],
+    title_visible: bool | None = None,
+) -> dict[str, Any] | None:
     doc_row = catalog.get_document(conn, dataset["db"], sample["doc_id"])
     if doc_row is None:
         return None
@@ -113,7 +164,11 @@ def _record(conn: Any, dataset: dict[str, Any], sample: dict[str, Any], template
         "doc_id": doc_row["doc_id"],
         "shared_id": doc_row["doc_id"],
         "split": sample["split"],
-        "title": (doc_row.get("title") or "") if TITLE_VISIBLE else "",
+        "title": (
+            (doc_row.get("title") or "")
+            if (TITLE_VISIBLE if title_visible is None else title_visible)
+            else ""
+        ),
         "template_id": dataset["template"],
         "template_name": template["name"],
         "language": doc_row.get("language") or "en",
@@ -296,9 +351,18 @@ def run(
     include_country_list: bool = True,
     geometry: bool = False,
     no_metadata: bool = False,
+    prompt_override: str | None = None,
+    prompt_version_override: str | None = None,
+    selected_ids: list[str] | None = None,
+    max_requests_override: int | None = None,
+    replay_of: str | None = None,
+    method_suffix: str = "",
+    sampling_policy: str = "agent_all_train",
+    title_visible_override: bool | None = None,
 ) -> dict[str, Any]:
     if geometry and not include_country_list:
         raise SystemExit("--geometry with --no-country-list is not a supported combination.")
+    title_visible = TITLE_VISIBLE if title_visible_override is None else title_visible_override
     conn = catalog.connect()
     try:
         dataset = _load_dataset(conn, dataset_id)
@@ -322,8 +386,21 @@ def run(
             property_type = properties[property_name]["type"]
 
         train_rows = _rows(conn, dataset_id, "train", limit_train)
+        if selected_ids:
+            order = {doc_id: index for index, doc_id in enumerate(selected_ids)}
+            train_rows = sorted(
+                (row for row in train_rows if row["doc_id"] in order),
+                key=lambda row: order[row["doc_id"]],
+            )
         test_rows = _rows(conn, dataset_id, "test", limit_test)
-        train_records = [r for r in (_record(conn, dataset, row, template) for row in train_rows) if r]
+        train_records = [
+            r
+            for r in (
+                _record(conn, dataset, row, template, title_visible=title_visible)
+                for row in train_rows
+            )
+            if r
+        ]
         if geometry:
             train_records = [records.with_geometry(record) for record in train_records]
         if not train_records:
@@ -338,7 +415,10 @@ def run(
     directory.mkdir(parents=True, exist_ok=True)
 
     redact_properties = _target_properties(dataset_id, field)
-    if is_records:
+    if prompt_override is not None:
+        task_prompt = prompt_override
+        prompt_version = prompt_version_override or prompt.PROMPT_VERSION
+    elif is_records:
         prompt_version = (
             prompt.PROMPT_VERSION_RECOMMENDATIONS
             if include_country_list
@@ -353,7 +433,7 @@ def run(
             template_name=template["name"],
             train_total=len(train_records),
             state_labels=_candidate_values("upr_state", "relationship", train_records, field) or [],
-            title_visible=TITLE_VISIBLE,
+            title_visible=title_visible,
             target_metadata_hidden=True,
             include_state_list=include_country_list,
             geometry=geometry,
@@ -372,16 +452,17 @@ def run(
             template_name=template["name"],
             train_total=len(train_records),
             allowed_values=_candidate_values(dataset_id, property_type, train_records, field),
-            title_visible=TITLE_VISIBLE,
+            title_visible=title_visible,
             target_metadata_hidden=True,
             geometry=geometry,
             metadata_visible=not no_metadata,
             **_prompt_extras(dataset_id),
         )
+    max_requests = max_requests_override or int(os.environ.get("ADMIN_AGENT_MAX_REQUESTS", "40"))
     author_request = {
         "mode": "author",
         "dataset_id": dataset_id,
-        "max_requests": int(os.environ.get("ADMIN_AGENT_MAX_REQUESTS", "40")),
+        "max_requests": max_requests,
         "task_prompt": task_prompt,
         "template": template,
         "train_entities": [
@@ -421,7 +502,9 @@ def run(
             for record in train_records:
                 _write_execute_sample(handle, record, redact_properties, drop_metadata=no_metadata)
             for row in test_rows:
-                record = _record(exec_conn, dataset, row, template)
+                record = _record(
+                    exec_conn, dataset, row, template, title_visible=title_visible
+                )
                 if record is None:
                     continue
                 if geometry:
@@ -439,17 +522,19 @@ def run(
     if not test_count:
         raise SystemExit("No test documents with segmentation found.")
 
+    prediction_key_map = (
+        {"state_reviewed": "state_under_review"}
+        if is_records
+        else ({property_name: field} if property_name != field else {})
+    )
+    score_property_names = ["state_under_review"] if is_records else [field]
     execute_request = {
         "mode": "execute",
         "extractor_source": code,
         "samples_path": str(execute_path),
-        "prediction_key_map": (
-            {"state_reviewed": "state_under_review"}
-            if is_records
-            else ({property_name: field} if property_name != field else {})
-        ),
+        "prediction_key_map": prediction_key_map,
         "score": {
-            "property_names": ["state_under_review"] if is_records else [field],
+            "property_names": score_property_names,
             "expected": expected,
             "policy": "normalized",
         },
@@ -488,11 +573,76 @@ def run(
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
     prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
-    method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}"
+    selected_shared_ids = [record["doc_id"] for record in train_records]
+    candidate_count = (
+        len(_candidate_values(dataset_id, property_type, train_records, field) or [])
+        if include_country_list
+        else 0
+    )
+    spec_core = {
+        "spec_version": 1,
+        "adapter_version": _package_version(),
+        "git_commit": _git_commit(),
+        "evaluation_version": _evaluation_version(),
+        "dataset_id": dataset_id,
+        "db": dataset["db"],
+        "task_kind": "records" if is_records else "properties",
+        "fields": fields,
+        "benchmark_field": field,
+        "benchmark_fields": fields,
+        "property_name": property_name,
+        "property_type": property_type,
+        "model": author.get("model"),
+        "base_url": author.get("base_url"),
+        "prompt_version": prompt_version,
+        "prompt_sha256": hashlib.sha256(task_prompt.encode()).hexdigest(),
+        "prompt_chars": len(task_prompt),
+        "condition": {
+            "title_visible": title_visible,
+            "no_metadata": no_metadata,
+            "metadata_visible": not no_metadata,
+            "geometry": geometry,
+            "target_properties_redacted": sorted(redact_properties),
+        },
+        "sampling": {
+            "policy": sampling_policy,
+            "selected_shared_ids": selected_shared_ids,
+            "authoring_documents": len(train_records),
+            "limit_train": limit_train,
+            "limit_test": limit_test,
+        },
+        "candidate_list": {
+            "included": include_country_list
+            and dataset_id in {"upr_state", "upr_recommendations"},
+            "count": candidate_count,
+        },
+        "execution": {
+            "property_names": score_property_names,
+            "prediction_key_map": prediction_key_map,
+            "score_policy": "normalized",
+        },
+        "template": {"name": template["name"], "id": dataset["template"]},
+        "split_policy_version": dataset["manifest"].get("split_policy_version"),
+        "max_requests": max_requests,
+    }
+    spec_hash = _spec_digest(spec_core)
+    base_method_id = f"admin_agent_{dataset_id}_{model_slug}_{prompt_slug}_{spec_hash[:8]}"
+    method_id = f"{base_method_id}{method_suffix}"
+    if (runs.METHODS_DIR / method_id).exists():
+        method_id = f"{method_id}-r{stamp}"
+        spec_core["rerun_of"] = base_method_id
+    spec = {
+        **spec_core,
+        "spec_hash": spec_hash,
+        "method_id": method_id,
+        "created_at": now,
+    }
+    if replay_of:
+        spec["replay_of"] = replay_of
     config = {
         "condition": "no_title",
         "prompt_version": prompt_version,
-        "title_visible": TITLE_VISIBLE,
+        "title_visible": title_visible,
         "target_property_visible_at_execution": False,
         "target_properties_redacted": sorted(redact_properties),
         "source": "primary-document segmentation",
@@ -502,11 +652,10 @@ def run(
         "benchmark_field": field,
         "benchmark_fields": fields,
         "property_type": property_type,
-        "candidate_values": (
-            len(_candidate_values(dataset_id, property_type, train_records, field) or [])
-            if include_country_list
-            else 0
-        ),
+        "candidate_values": candidate_count,
+        "spec_hash": spec_hash,
+        "sampling_policy": sampling_policy,
+        "selected_train_documents": len(selected_shared_ids),
         "geometry": geometry,
         "no_metadata": no_metadata,
         "metadata_visible": not no_metadata,
@@ -549,6 +698,7 @@ def run(
         "source": "primary-document segmentation",
         "geometry": geometry,
     }
+    method["spec_hash"] = spec_hash
     attempt = {
         "round": 1,
         "kind": "admin_agent_author",
@@ -564,8 +714,15 @@ def run(
             key: value for key, value in extractor.items() if key != "python_code"
         },
         "empty_response": bool(author.get("empty_output")),
+        "selected_shared_ids": selected_shared_ids,
     }
-    runs.write_method(method, prompt=task_prompt, script=code, attempts=[attempt])
+    runs.write_method(
+        method,
+        prompt=task_prompt,
+        script=code,
+        attempts=[attempt],
+        spec=spec,
+    )
 
     run_id = runs.new_run_id(method_id, dataset_id, "train_test")
     run = evaluate.build_run(
@@ -604,7 +761,11 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", required=True, help="single-field Plan dataset id, e.g. plan_year")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="dataset id, e.g. plan_year (required unless --replay is used)",
+    )
     parser.add_argument("--limit-train", type=int, default=None, help="limit train documents (spike)")
     parser.add_argument("--limit-test", type=int, default=None, help="limit test documents (spike)")
     parser.add_argument(
@@ -622,11 +783,34 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Drop ctx.metadata entirely at execution time (clean text-only condition).",
     )
+    parser.add_argument(
+        "--replay",
+        default=None,
+        help="Replay a method from its spec.json (see --replay-mode).",
+    )
+    parser.add_argument(
+        "--replay-mode",
+        choices=["execute", "author"],
+        default="execute",
+        help="execute: run the stored frozen script; author: re-author from the stored prompt.",
+    )
     args = parser.parse_args(argv)
 
     if not CATALOG_PATH.exists():
         raise SystemExit("Catalog missing. Run `uv run build-datasets` first.")
     _preflight()
+    if args.replay:
+        if args.dataset:
+            raise SystemExit("Use either --dataset (new run) or --replay (stored method), not both.")
+        if args.replay_mode == "author":
+            result = replay_author(args.replay)
+            print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
+        else:
+            result = replay_execute(args.replay)
+            print(f"\nRun: {result['run']['run_id']}", file=sys.stderr)
+        return 0
+    if not args.dataset:
+        raise SystemExit("--dataset is required unless --replay is used.")
     result = run(
         args.dataset,
         args.limit_train,
@@ -641,3 +825,196 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _load_spec(method_id: str) -> dict[str, Any]:
+    path = runs.METHODS_DIR / method_id / "spec.json"
+    if not path.exists():
+        raise SystemExit(
+            f"No spec.json for method {method_id!r}. Methods created before self-contained "
+            "specs cannot be replayed; re-run them with the current CLI to create one."
+        )
+    spec = records.read_json(path)
+    if not isinstance(spec, dict) or "spec_version" not in spec:
+        raise SystemExit(f"Invalid spec.json for method {method_id!r}")
+    return spec
+
+
+def _method_script(method_id: str) -> str:
+    path = runs.METHODS_DIR / method_id / "script.py"
+    if not path.exists():
+        raise SystemExit(f"No script.py for method {method_id!r}")
+    return path.read_text(encoding="utf-8")
+
+
+def replay_execute(method_id: str) -> dict[str, Any]:
+    """Run a stored method's frozen script under its recorded condition.
+
+    Deterministic: same script, same test split, same geometry/metadata
+    condition. A new run is added under the method; the method is not modified.
+    """
+    spec = _load_spec(method_id)
+    dataset_id = str(spec["dataset_id"])
+    fields = list(spec["benchmark_fields"])
+    condition = spec.get("condition") or {}
+    geometry = bool(condition.get("geometry"))
+    no_metadata = bool(condition.get("no_metadata"))
+    redact_properties = set(condition.get("target_properties_redacted") or [])
+    limit_test = (spec.get("sampling") or {}).get("limit_test")
+    selected_ids = list((spec.get("sampling") or {}).get("selected_shared_ids") or [])
+
+    conn = catalog.connect()
+    try:
+        dataset = _load_dataset(conn, dataset_id)
+        template = _load_template(dataset)
+        train_rows = _rows(conn, dataset_id, "train", None)
+        order = {doc_id: index for index, doc_id in enumerate(selected_ids)}
+        train_rows = sorted(
+            (row for row in train_rows if row["doc_id"] in order),
+            key=lambda row: order[row["doc_id"]],
+        )
+        test_rows = _rows(conn, dataset_id, "test", limit_test)
+    finally:
+        conn.close()
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    directory = WORK_DIR / "admin_agent" / f"replay_{stamp}_{runs.slug(method_id)}"
+    directory.mkdir(parents=True, exist_ok=True)
+    execute_path = directory / "execute_samples.jsonl"
+    expected: dict[str, dict[str, Any]] = {}
+    sample_meta: list[dict[str, Any]] = []
+    test_count = 0
+    exec_conn = catalog.connect()
+    try:
+        with execute_path.open("w", encoding="utf-8") as handle:
+            for row in train_rows:
+                record = _record(
+                    exec_conn,
+                    dataset,
+                    row,
+                    template,
+                    title_visible=bool(condition.get("title_visible")),
+                )
+                if record is None:
+                    continue
+                if geometry:
+                    record = records.with_geometry(record)
+                _write_execute_sample(
+                    handle, record, redact_properties, drop_metadata=no_metadata
+                )
+                expected[record["doc_id"]] = record["gold"]
+                sample_meta.append(
+                    {"doc_id": record["doc_id"], "split": "train", "gold": record["gold"]}
+                )
+            for row in test_rows:
+                record = _record(
+                    exec_conn,
+                    dataset,
+                    row,
+                    template,
+                    title_visible=bool(condition.get("title_visible")),
+                )
+                if record is None:
+                    continue
+                if geometry:
+                    record = records.with_geometry(record)
+                _write_execute_sample(
+                    handle, record, redact_properties, drop_metadata=no_metadata
+                )
+                expected[record["doc_id"]] = record["gold"]
+                sample_meta.append(
+                    {"doc_id": record["doc_id"], "split": "test", "gold": record["gold"]}
+                )
+                test_count += 1
+    finally:
+        exec_conn.close()
+    if not test_count:
+        raise SystemExit("No test documents with segmentation found.")
+
+    execute_request = {
+        "mode": "execute",
+        "extractor_source": _method_script(method_id),
+        "samples_path": str(execute_path),
+        "prediction_key_map": (spec.get("execution") or {}).get("prediction_key_map") or {},
+        "score": {
+            "property_names": (spec.get("execution") or {}).get("property_names") or fields,
+            "expected": expected,
+            "policy": "normalized",
+        },
+    }
+    execution = _invoke_sidecar("execute", execute_request, directory)
+    if execution.get("status") != "ok":
+        raise SystemExit(f"Extractor execution failed: {execution.get('error')}")
+    predictions = {item["doc_id"]: item for item in execution.get("predictions") or []}
+    scored_records, metrics = evaluate.score_records(dataset_id, fields, sample_meta, predictions)
+    usage = {"replay": "execute"}
+    metrics["token_usage"] = usage
+    metrics["admin_eval"] = execution.get("admin_eval")
+    metrics["replay"] = {
+        "mode": "execute",
+        "method_id": method_id,
+        "spec_hash": spec.get("spec_hash"),
+    }
+
+    now = datetime.now(UTC).isoformat()
+    run_id = runs.new_run_id(method_id, dataset_id, "replay_execute")
+    run = evaluate.build_run(
+        run_id=run_id,
+        method_id=method_id,
+        dataset_id=dataset_id,
+        status="completed",
+        created_at=now,
+        counts=metrics["status_counts"]["test"],
+        metrics=metrics,
+        manifest=dataset["manifest"],
+        usage=usage,
+    )
+    prompt_path = runs.METHODS_DIR / method_id / "prompt.txt"
+    prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else None
+    runs.write_run(
+        run,
+        scored_records,
+        metrics,
+        prompt=prompt_text,
+        script=_method_script(method_id),
+    )
+    primary = metrics["primary"]
+    print(f"\nReplay run: {run_id}")
+    print(
+        f"  train {primary['train']:.3f} · test {primary['test']:.3f} · "
+        f"test statuses {metrics['status_counts']['test']}",
+        flush=True,
+    )
+    return {"run": run, "metrics": metrics, "request_dir": str(directory)}
+
+
+def replay_author(method_id: str) -> dict[str, Any]:
+    """Re-author from a stored prompt + the same selected train documents.
+
+    The new extractor is stochastic, so it is written as a NEW method (suffix
+    ``-r<timestamp>``) rather than overwriting the replayed method.
+    """
+    spec = _load_spec(method_id)
+    prompt_path = runs.METHODS_DIR / method_id / "prompt.txt"
+    if not prompt_path.exists():
+        raise SystemExit(f"No prompt.txt for method {method_id!r}")
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    sampling = spec.get("sampling") or {}
+    condition = spec.get("condition") or {}
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    return run(
+        str(spec["dataset_id"]),
+        None,
+        sampling.get("limit_test"),
+        include_country_list=bool((spec.get("candidate_list") or {}).get("included", True)),
+        geometry=bool(condition.get("geometry")),
+        no_metadata=bool(condition.get("no_metadata")),
+        prompt_override=prompt_text,
+        prompt_version_override=str(spec.get("prompt_version") or prompt.PROMPT_VERSION),
+        selected_ids=list(sampling.get("selected_shared_ids") or []),
+        max_requests_override=int(spec.get("max_requests") or 40),
+        replay_of=method_id,
+        method_suffix=f"-r{stamp}",
+        sampling_policy=f"replay:{sampling.get('policy', 'unknown')}",
+        title_visible_override=bool(condition.get("title_visible")),
+    )
