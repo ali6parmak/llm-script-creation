@@ -221,6 +221,17 @@ def repair_rounds_value(
     return 0
 
 
+def method_display_name(
+    method: dict[str, Any], run: dict[str, Any] | None = None
+) -> str:
+    """Unique, readable method label (identical names are common across control/repair)."""
+    name = method.get("name") or method.get("method_id", "")
+    short = method.get("method_id", "")[-8:]
+    rounds = repair_rounds_value(method, run)
+    noun = "repair" if rounds == 1 else "repairs"
+    return f"{name} · {short} · {rounds} {noun}"
+
+
 def method_attempts(method_id: str) -> list[dict[str, Any]]:
     """Admin-agent authoring/repair rounds (stored on the method, not the run)."""
     directory = run_artifacts.METHODS_DIR / method_id / "attempts"
@@ -288,7 +299,7 @@ def method_card(
     description = html.escape((method.get("description") or "")[:150])
     return f"""
     <div class="uw-card" style="border-left-color:{color}">
-      <div class="uw-card-title">{html.escape(method.get("name", method["method_id"]))}</div>
+      <div class="uw-card-title">{html.escape(method_display_name(method, run))}</div>
       <div class="uw-card-id">{html.escape(method["method_id"])}</div>
       <div>
         {badge(method.get("type", "method"), color)}
@@ -745,7 +756,7 @@ def method_comparison_table(
         repair_rounds = repair_rounds_value(method, run)
         rows.append(
             {
-                "method": method.get("name", method["method_id"]),
+                "method": method_display_name(method, run),
                 "type": method.get("type", ""),
                 "model": method.get("model") or "—",
                 "examples": len(examples),
@@ -1152,9 +1163,7 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
         method = next((item for item in methods if item["method_id"] == value), None)
         if method is None:
             return value
-        rounds = repair_rounds_value(method, latest_run(value, run_index))
-        noun = "repair" if rounds == 1 else "repairs"
-        return f"{method.get('name', value)} · {value[-8:]} · {rounds} {noun}"
+        return method_display_name(method, latest_run(value, run_index))
 
     selected = st.selectbox(
         "Open method",
@@ -1208,7 +1217,7 @@ def page_compare(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
         legend.append(
             {
                 "method": method_id,
-                "name": method.get("name", ""),
+                "name": method_display_name(method, latest_run(method_id, run_index)),
                 "dataset": method.get("dataset_id", ""),
                 "type": method.get("type", ""),
                 "model": method.get("model", ""),

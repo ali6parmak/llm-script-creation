@@ -1091,9 +1091,16 @@ def run(
                 "repair_feedback_pool_documents": len(repair_info["feedback_pool_ids"]),
             }
         )
+    name_suffix = ""
+    if repair_enabled:
+        name_suffix = (
+            " [40/10 control]"
+            if repair_rounds_count == 0
+            else f" [repair ×{repair_rounds_count}]"
+        )
     method = evaluate.build_method(
         method_id=method_id,
-        name=f"Admin agent extractor — {dataset_id} ({prompt_version})",
+        name=f"Admin agent extractor — {dataset_id} ({prompt_version}){name_suffix}",
         description=(
             "The real Uwazi admin agent's nested extractor subagent authors `def extract(text, ctx)` "
             "from primary-document segmentation on the train split (NO-TITLE condition: entity "
