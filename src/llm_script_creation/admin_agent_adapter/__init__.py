@@ -4,8 +4,8 @@ The benchmark's main process must not import ``uwazi_admin_agent`` (that would
 drag pydantic-ai / rapidfuzz / dateutil into our environment). The package is
 split accordingly:
 
-* main-process safe (stdlib + our package only): :mod:`prompt`, :mod:`evaluate`
-  and the request/response plumbing in :mod:`cli`.
+* main-process safe (stdlib + our package only): :mod:`prompt`, :mod:`evaluate`,
+  :mod:`sampling` and the request/response plumbing in :mod:`cli`.
 * sidecar-only (imports ``uwazi_admin_agent`` / ``uwazi_agent``): :mod:`records`,
   :mod:`ports`, :mod:`runner`, :mod:`sandbox`. They run inside
   ``scripts/admin_agent_sidecar.py`` with the admin agent's own venv.

@@ -35,7 +35,7 @@ from .. import normalization as normalization_module
 from ..configuration import CATALOG_PATH, WORK_DIR
 from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
 from ..normalization import load_states
-from . import evaluate, prompt, records
+from . import evaluate, prompt, records, sampling
 
 TYPE = "admin_agent_extractor"
 DOCUMENT_TEMPLATE_BY_DB = {"plan": PLAN_DOCUMENT_TEMPLATE, "upr": UPR_DOCUMENT_TEMPLATE}
@@ -357,7 +357,8 @@ def run(
     max_requests_override: int | None = None,
     replay_of: str | None = None,
     method_suffix: str = "",
-    sampling_policy: str = "agent_all_train",
+    sampling_policy: str = "agent",
+    sampling_size: int = sampling.DEFAULT_SIZE,
     title_visible_override: bool | None = None,
     redact_target_metadata: bool = True,
     prompt_source_path: str | None = None,
@@ -403,12 +404,36 @@ def run(
             )
             if r
         ]
-        if geometry:
-            train_records = [records.with_geometry(record) for record in train_records]
         if not train_records:
             raise SystemExit("No train documents with segmentation found.")
         if not test_rows:
             raise SystemExit("No test documents with segmentation found.")
+        # The authoring universe is chosen on the train split only. For the
+        # default ``agent`` policy this is a no-op (all train docs); the
+        # restricted policies pick a deterministic subset. Geometry is applied
+        # afterwards so the sampler always sees plain paragraph text.
+        try:
+            if selected_ids:
+                sampling_result = sampling.restrict_documents(
+                    dataset_id, train_records, selected_ids, policy=sampling_policy
+                )
+            else:
+                sampling_result = sampling.sample_documents(
+                    dataset_id,
+                    train_records,
+                    policy=sampling_policy,
+                    size=sampling_size,
+                )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        by_id = {record["doc_id"]: record for record in train_records}
+        train_records = [
+            by_id[doc_id] for doc_id in sampling_result.doc_ids if doc_id in by_id
+        ]
+        if not train_records:
+            raise SystemExit("Sampling produced no train documents.")
+        if geometry:
+            train_records = [records.with_geometry(record) for record in train_records]
     finally:
         conn.close()
 
@@ -419,6 +444,8 @@ def run(
     redact_properties = (
         _target_properties(dataset_id, field) if redact_target_metadata else set()
     )
+    sample_note = sampling_result.prompt_note()
+    restricted_sampling = sampling_result.policy not in sampling.AGENT_POLICIES
     if prompt_override is not None:
         task_prompt = prompt_override
         prompt_version = prompt_version_override or prompt.PROMPT_VERSION
@@ -432,6 +459,8 @@ def run(
             prompt_version += "-geometry"
         if no_metadata:
             prompt_version += "-no-metadata"
+        if restricted_sampling:
+            prompt_version += f"-sample-{sampling_result.policy}"
         task_prompt = prompt.build_recommendations_task(
             dataset_id=dataset_id,
             template_name=template["name"],
@@ -442,6 +471,7 @@ def run(
             include_state_list=include_country_list,
             geometry=geometry,
             metadata_visible=not no_metadata,
+            sample_note=sample_note,
         )
     else:
         prompt_version = prompt.PROMPT_VERSION
@@ -449,6 +479,8 @@ def run(
             prompt_version += "-geometry"
         if no_metadata:
             prompt_version += "-no-metadata"
+        if restricted_sampling:
+            prompt_version += f"-sample-{sampling_result.policy}"
         task_prompt = prompt.build_author_task(
             dataset_id=dataset_id,
             property_name=property_name,
@@ -460,6 +492,7 @@ def run(
             target_metadata_hidden=True,
             geometry=geometry,
             metadata_visible=not no_metadata,
+            sample_note=sample_note,
             **_prompt_extras(dataset_id),
         )
     max_requests = max_requests_override or int(os.environ.get("ADMIN_AGENT_MAX_REQUESTS", "40"))
@@ -577,7 +610,7 @@ def run(
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
     prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
-    selected_shared_ids = [record["doc_id"] for record in train_records]
+    selected_shared_ids = list(sampling_result.doc_ids)
     candidate_count = (
         len(_candidate_values(dataset_id, property_type, train_records, field) or [])
         if include_country_list
@@ -615,9 +648,7 @@ def run(
             "target_properties_redacted": sorted(redact_properties),
         },
         "sampling": {
-            "policy": sampling_policy,
-            "selected_shared_ids": selected_shared_ids,
-            "authoring_documents": len(train_records),
+            **sampling_result.to_spec(),
             "limit_train": limit_train,
             "limit_test": limit_test,
         },
@@ -664,7 +695,11 @@ def run(
         "property_type": property_type,
         "candidate_values": candidate_count,
         "spec_hash": spec_hash,
-        "sampling_policy": sampling_policy,
+        "sampling_policy": sampling_result.policy,
+        "sampling_note": sample_note,
+        "sampling_universe_documents": sampling_result.universe,
+        "sampling_strata": sampling_result.strata,
+        "sampling_hard_cases": sampling_result.hard_cases,
         "selected_train_documents": len(selected_shared_ids),
         "geometry": geometry,
         "no_metadata": no_metadata,
@@ -725,6 +760,7 @@ def run(
         },
         "empty_response": bool(author.get("empty_output")),
         "selected_shared_ids": selected_shared_ids,
+        "sampling": sampling_result.to_spec(),
     }
     runs.write_method(
         method,
@@ -814,6 +850,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not remove the target property from execution metadata (old v1/v2 runs).",
     )
     parser.add_argument(
+        "--sample-policy",
+        choices=list(sampling.POLICIES),
+        default="agent",
+        help=(
+            "Authoring-sample policy. agent (default): all 50 train docs, the "
+            "extractor discovers its own 8-12. coverage/similarity/hybrid: restrict "
+            "the authoring universe to a deterministic ~12-document subset."
+        ),
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=sampling.DEFAULT_SIZE,
+        help="Cap for the restricted sample policies (default 12).",
+    )
+    parser.add_argument(
         "--replay",
         default=None,
         help="Replay a method from its spec.json (see --replay-mode).",
@@ -861,6 +913,8 @@ def main(argv: list[str] | None = None) -> int:
         title_visible_override=True if args.with_title else None,
         redact_target_metadata=not args.target_metadata_visible,
         prompt_source_path=args.prompt_file,
+        sampling_policy=args.sample_policy,
+        sampling_size=args.sample_size,
     )
     print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
     return 0
