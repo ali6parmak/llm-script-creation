@@ -42,7 +42,7 @@ def _plan_scored(
     }
 
 
-def test_split_validation_is_deterministic_and_stratified() -> None:
+def test_split_validation_is_deterministic_and_proportional() -> None:
     records = (
         [_record(f"res{index}", "Resolution") for index in range(15)]
         + [_record(f"sp{index}", "Special Procedures' report") for index in range(6)]
@@ -60,14 +60,16 @@ def test_split_validation_is_deterministic_and_stratified() -> None:
     assert first.validation_ids() == second.validation_ids()
     assert first.digest == second.digest
     assert set(first.validation_ids()).isdisjoint(first.feedback_ids())
-    # one per stratum first: every rare class appears in validation
+    # proportional: the slice mirrors the mix; a singleton stays in feedback
     assert set(first.strata) == {
         "Resolution",
         "Special Procedures' report",
         "ExCom Conclusion",
         "Regional treaty",
     }
-    assert all(item["validation"] >= 1 for item in first.strata.values())
+    assert first.strata["Resolution"]["validation"] >= 2
+    assert first.strata["Regional treaty"]["validation"] == 0
+    assert "rare" in first.feedback_ids()
 
 
 def test_split_validation_caps_small_pools_and_rejects_tiny_ones() -> None:

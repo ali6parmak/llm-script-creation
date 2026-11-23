@@ -771,18 +771,24 @@ def run(
                 round_index=round_index,
                 total_rounds=repair_rounds,
             )
-            _, response = _author_once(
-                directory,
-                f"author_round{round_index}",
-                repair_prompt,
-                author_records,
-                template,
-                dataset_id,
-                max_requests,
-                round_index=round_index,
-            )
-            code = response["extractor"]["python_code"]
-            last_scored, feedback_score, validation_score = score_round(round_index, code)
+            try:
+                _, response = _author_once(
+                    directory,
+                    f"author_round{round_index}",
+                    repair_prompt,
+                    author_records,
+                    template,
+                    dataset_id,
+                    max_requests,
+                    round_index=round_index,
+                )
+                code = response["extractor"]["python_code"]
+                last_scored, feedback_score, validation_score = score_round(round_index, code)
+            except SystemExit as exc:
+                # Keep the best completed round instead of losing the run.
+                stop_reason = f"round_{round_index}_failed"
+                print(f"  repair round {round_index} failed: {exc}", flush=True)
+                break
             responses.append(response)
             rounds.append(
                 round_entry(

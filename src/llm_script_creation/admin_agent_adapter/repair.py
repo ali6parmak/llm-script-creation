@@ -108,21 +108,38 @@ class RepairSplit:
         return [str(record["doc_id"]) for record in self.feedback]
 
 
-def _proportional_extras(leftovers: dict[str, list[str]], slots: int) -> dict[str, int]:
-    if slots <= 0 or not leftovers:
-        return {}
-    total = sum(len(ids) for ids in leftovers.values())
-    if not total:
-        return {}
+def _proportional_quotas(sizes: dict[str, int], slots: int) -> dict[str, int]:
+    """Largest-remainder quotas capped by each stratum's size."""
+    total = sum(sizes.values())
+    if slots <= 0 or not total:
+        return {name: 0 for name in sizes}
     quotas: dict[str, int] = {}
     remainders = []
-    for name, ids in leftovers.items():
-        exact = slots * len(ids) / total
-        quotas[name] = int(exact)
+    for name, count in sizes.items():
+        exact = slots * count / total
+        quotas[name] = min(int(exact), count)
         remainders.append((-(exact - int(exact)), name))
     assigned = sum(quotas.values())
-    for _, name in sorted(remainders)[: max(0, slots - assigned)]:
-        quotas[name] += 1
+    ordered = sorted(remainders)
+    # Largest remainder: at most one extra slot per stratum in the first pass.
+    for _, name in ordered:
+        if assigned >= slots:
+            break
+        if quotas[name] < sizes[name]:
+            quotas[name] += 1
+            assigned += 1
+    # Capacity fallback (a stratum can be smaller than its ideal quota).
+    while assigned < slots:
+        moved = False
+        for _, name in ordered:
+            if assigned >= slots:
+                break
+            if quotas[name] < sizes[name]:
+                quotas[name] += 1
+                assigned += 1
+                moved = True
+        if not moved:
+            break
     return quotas
 
 
@@ -135,10 +152,11 @@ def split_validation(
 ) -> RepairSplit:
     """Split train records into a feedback pool and a frozen validation slice.
 
-    Strata are the dataset's own labels (document type, year decade, ...). One
-    document per stratum is taken first so rare classes appear, then the
-    remaining slots are filled proportionally. For small pools the slice is
-    capped at ~20% so a spike still has feedback documents left.
+    Strata are the dataset's own labels (document type, year decade, ...) and
+    the slice is allocated proportionally, so validation mirrors the training
+    distribution instead of over-representing rare classes. Singletons stay in
+    the feedback pool unless they win a proportional slot. For small pools the
+    slice is capped at ~20% so a spike still has feedback documents left.
     """
     unique = {str(record.get("doc_id")): record for record in records}
     ordered = [dict(unique[doc_id]) for doc_id in sorted(unique)]
@@ -151,18 +169,13 @@ def split_validation(
     for ids in groups.values():
         ids.sort(key=lambda record: _hash_rank(dataset_id, str(record["doc_id"]), seed))
 
-    ordered_groups = sorted(groups.items(), key=lambda item: (len(item[1]), item[0]))
+    ordered_groups = sorted(groups.items(), key=lambda item: item[0])
+    quotas = _proportional_quotas(
+        {name: len(ids) for name, ids in ordered_groups}, size
+    )
     chosen: list[dict[str, Any]] = []
-    if len(ordered_groups) <= size:
-        for _, ids in ordered_groups:
-            chosen.append(ids[0])
-        leftovers = {name: ids[1:] for name, ids in ordered_groups if len(ids) > 1}
-        remaining = size - len(chosen)
-        for name, count in _proportional_extras(leftovers, remaining).items():
-            chosen.extend(leftovers[name][:count])
-    else:
-        for _, ids in ordered_groups[:size]:
-            chosen.append(ids[0])
+    for name, ids in ordered_groups:
+        chosen.extend(ids[: quotas.get(name, 0)])
 
     if len(chosen) < size:
         selected = {str(record["doc_id"]) for record in chosen}
