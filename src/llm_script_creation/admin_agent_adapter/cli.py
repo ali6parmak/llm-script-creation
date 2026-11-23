@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ from .. import normalization as normalization_module
 from ..configuration import CATALOG_PATH, WORK_DIR
 from ..db import PLAN_DOCUMENT_TEMPLATE, UPR_DOCUMENT_TEMPLATE, get_db
 from ..normalization import load_states
-from . import evaluate, prompt, records, sampling
+from . import evaluate, prompt, records, repair, sampling
 
 TYPE = "admin_agent_extractor"
 DOCUMENT_TEMPLATE_BY_DB = {"plan": PLAN_DOCUMENT_TEMPLATE, "upr": UPR_DOCUMENT_TEMPLATE}
@@ -309,11 +310,14 @@ def _preflight() -> None:
         )
 
 
-def _invoke_sidecar(mode: str, request: dict[str, Any], directory: Path) -> dict[str, Any]:
+def _invoke_sidecar(
+    mode: str, request: dict[str, Any], directory: Path, label: str | None = None
+) -> dict[str, Any]:
     """Write a request JSON, run the sidecar with the admin venv, read the response."""
     script = _repo_root() / "scripts" / "admin_agent_sidecar.py"
-    request_path = directory / f"{mode}_request.json"
-    response_path = directory / f"{mode}_response.json"
+    stem = label or mode
+    request_path = directory / f"{stem}_request.json"
+    response_path = directory / f"{stem}_response.json"
     records.write_json(request_path, request)
     command = [str(_admin_python()), str(script), "--mode", mode, "--request", str(request_path), "--response", str(response_path)]
     timeout = float(os.environ.get("ADMIN_AGENT_TIMEOUT", "2400"))
@@ -344,6 +348,108 @@ def _sidecar_usage(response: dict[str, Any]) -> dict[str, Any]:
     return usage
 
 
+def _author_once(
+    directory: Path,
+    label: str,
+    task_prompt: str,
+    entities: list[dict[str, Any]],
+    template: dict[str, Any],
+    dataset_id: str,
+    max_requests: int,
+    *,
+    round_index: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one authoring/repair round through the sidecar."""
+    request = {
+        "mode": "author",
+        "dataset_id": dataset_id,
+        "max_requests": max_requests,
+        "task_prompt": task_prompt,
+        "template": template,
+        "train_entities": [
+            {key: value for key, value in record.items() if key != "gold"} for record in entities
+        ],
+    }
+    suffix = "" if round_index is None else f" (round {round_index})"
+    print(f"Authoring via admin agent on {len(entities)} train documents{suffix} …", flush=True)
+    response = _invoke_sidecar("author", request, directory, label=label)
+    if response.get("status") != "ok":
+        print(
+            json.dumps(
+                {k: response.get(k) for k in ("status", "error", "validation", "model")},
+                indent=2,
+            )
+        )
+        raise SystemExit(
+            f"Admin agent did not return a valid extractor (see {directory / f'{label}_response.json'})"
+        )
+    extractor = response["extractor"]
+    print(
+        f"  model {response.get('model')} · requests {response.get('usage', {}).get('requests')} · "
+        f"tokens {response.get('usage', {}).get('total_tokens')} · "
+        f"samples {extractor.get('samples_matched')}/{extractor.get('samples_total')}",
+        flush=True,
+    )
+    return request, response
+
+
+def _execute_records(
+    directory: Path,
+    label: str,
+    code: str,
+    records: list[dict[str, Any]],
+    *,
+    dataset_id: str,
+    fields: list[str],
+    redact_properties: set[str],
+    no_metadata: bool,
+    prediction_key_map: dict[str, str],
+    score_property_names: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Execute one extractor over train-only records (repair rounds)."""
+    samples_path = directory / f"{label}_samples.jsonl"
+    expected: dict[str, dict[str, Any]] = {}
+    sample_meta: list[dict[str, Any]] = []
+    with samples_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            _write_execute_sample(handle, record, redact_properties, drop_metadata=no_metadata)
+            expected[record["doc_id"]] = record["gold"]
+            sample_meta.append(
+                {"doc_id": record["doc_id"], "split": "train", "gold": record["gold"]}
+            )
+    request = {
+        "mode": "execute",
+        "extractor_source": code,
+        "samples_path": str(samples_path),
+        "prediction_key_map": prediction_key_map,
+        "score": {
+            "property_names": score_property_names,
+            "expected": expected,
+            "policy": "normalized",
+        },
+    }
+    response = _invoke_sidecar("execute", request, directory, label=label)
+    if response.get("status") != "ok":
+        raise SystemExit(f"Extractor execution failed: {response.get('error')}")
+    predictions = {item["doc_id"]: item for item in response.get("predictions") or []}
+    scored, metrics = evaluate.score_records(dataset_id, fields, sample_meta, predictions)
+    return scored, metrics, predictions, response
+
+
+def _subset_score(
+    dataset_id: str, fields: list[str], records: list[dict[str, Any]]
+) -> float | None:
+    if not records:
+        return None
+    if dataset_id.startswith("plan_") and dataset_id != "plan_all_fields":
+        return float(evaluation_module.aggregate_plan(records, fields)["accuracy"])
+    if dataset_id == "upr_state":
+        return float(evaluation_module.aggregate_upr_state(records)["accuracy"])
+    if dataset_id == "upr_recommendations":
+        return float(evaluation_module.aggregate_upr(records)["f1"])
+    return None
+
+
 def run(
     dataset_id: str,
     limit_train: int | None,
@@ -362,9 +468,16 @@ def run(
     title_visible_override: bool | None = None,
     redact_target_metadata: bool = True,
     prompt_source_path: str | None = None,
+    repair_enabled: bool = False,
+    repair_rounds: int = 3,
+    repair_examples: int = repair.DEFAULT_REPAIR_EXAMPLES,
+    validation_size: int = repair.DEFAULT_VALIDATION_SIZE,
+    repair_patience: int = 2,
 ) -> dict[str, Any]:
     if geometry and not include_country_list:
         raise SystemExit("--geometry with --no-country-list is not a supported combination.")
+    if repair_enabled and selected_ids:
+        raise SystemExit("Repair cannot be combined with a stored selection (use a fresh run).")
     title_visible = TITLE_VISIBLE if title_visible_override is None else title_visible_override
     conn = catalog.connect()
     try:
@@ -408,32 +521,58 @@ def run(
             raise SystemExit("No train documents with segmentation found.")
         if not test_rows:
             raise SystemExit("No test documents with segmentation found.")
-        # The authoring universe is chosen on the train split only. For the
-        # default ``agent`` policy this is a no-op (all train docs); the
-        # restricted policies pick a deterministic subset. Geometry is applied
-        # afterwards so the sampler always sees plain paragraph text.
+        # Repair freezes a stratified validation slice BEFORE sampling. The
+        # validation docs are executed and scored, but never sent to authoring.
+        repair_split = None
+        feedback_records = list(train_records)
+        validation_records: list[dict[str, Any]] = []
+        if repair_enabled:
+            try:
+                repair_split = repair.split_validation(
+                    dataset_id, train_records, validation_size=validation_size
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            feedback_records = list(repair_split.feedback)
+            validation_records = list(repair_split.validation)
+
+        # The authoring universe is chosen from the feedback pool only. For the
+        # default ``agent`` policy this is a no-op; restricted policies pick a
+        # deterministic subset. Geometry is applied afterwards so the sampler
+        # always sees plain paragraph text.
         try:
             if selected_ids:
                 sampling_result = sampling.restrict_documents(
-                    dataset_id, train_records, selected_ids, policy=sampling_policy
+                    dataset_id, feedback_records, selected_ids, policy=sampling_policy
                 )
             else:
                 sampling_result = sampling.sample_documents(
                     dataset_id,
-                    train_records,
+                    feedback_records,
                     policy=sampling_policy,
                     size=sampling_size,
                 )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        by_id = {record["doc_id"]: record for record in train_records}
-        train_records = [
-            by_id[doc_id] for doc_id in sampling_result.doc_ids if doc_id in by_id
+        feedback_by_id = {record["doc_id"]: record for record in feedback_records}
+        author_records = [
+            feedback_by_id[doc_id]
+            for doc_id in sampling_result.doc_ids
+            if doc_id in feedback_by_id
         ]
-        if not train_records:
+        if not author_records:
             raise SystemExit("Sampling produced no train documents.")
+
+        eval_train_records = (
+            feedback_records + validation_records if repair_enabled else list(author_records)
+        )
         if geometry:
-            train_records = [records.with_geometry(record) for record in train_records]
+            eval_train_records = [
+                records.with_geometry(record) for record in eval_train_records
+            ]
+            eval_by_id = {record["doc_id"]: record for record in eval_train_records}
+            author_records = [eval_by_id[record["doc_id"]] for record in author_records]
+        train_records = eval_train_records
     finally:
         conn.close()
 
@@ -461,11 +600,13 @@ def run(
             prompt_version += "-no-metadata"
         if restricted_sampling:
             prompt_version += f"-sample-{sampling_result.policy}"
+        if repair_enabled:
+            prompt_version += "-repair"
         task_prompt = prompt.build_recommendations_task(
             dataset_id=dataset_id,
             template_name=template["name"],
-            train_total=len(train_records),
-            state_labels=_candidate_values("upr_state", "relationship", train_records, field) or [],
+            train_total=len(author_records),
+            state_labels=_candidate_values("upr_state", "relationship", author_records, field) or [],
             title_visible=title_visible,
             target_metadata_hidden=True,
             include_state_list=include_country_list,
@@ -481,13 +622,15 @@ def run(
             prompt_version += "-no-metadata"
         if restricted_sampling:
             prompt_version += f"-sample-{sampling_result.policy}"
+        if repair_enabled:
+            prompt_version += "-repair"
         task_prompt = prompt.build_author_task(
             dataset_id=dataset_id,
             property_name=property_name,
             property_type=property_type,
             template_name=template["name"],
-            train_total=len(train_records),
-            allowed_values=_candidate_values(dataset_id, property_type, train_records, field),
+            train_total=len(author_records),
+            allowed_values=_candidate_values(dataset_id, property_type, author_records, field),
             title_visible=title_visible,
             target_metadata_hidden=True,
             geometry=geometry,
@@ -496,29 +639,225 @@ def run(
             **_prompt_extras(dataset_id),
         )
     max_requests = max_requests_override or int(os.environ.get("ADMIN_AGENT_MAX_REQUESTS", "40"))
-    author_request = {
-        "mode": "author",
-        "dataset_id": dataset_id,
-        "max_requests": max_requests,
-        "task_prompt": task_prompt,
-        "template": template,
-        "train_entities": [
-            {key: value for key, value in record.items() if key != "gold"} for record in train_records
-        ],
-    }
-    print(f"Authoring via admin agent on {len(train_records)} train documents …", flush=True)
-    author = _invoke_sidecar("author", author_request, directory)
-    if author.get("status") != "ok":
-        print(json.dumps({k: author.get(k) for k in ("status", "error", "validation", "model")}, indent=2))
-        raise SystemExit(f"Admin agent did not return a valid extractor (see {directory})")
-    extractor = author["extractor"]
-    code = extractor["python_code"]
-    print(
-        f"  model {author.get('model')} · requests {author.get('usage', {}).get('requests')} · "
-        f"tokens {author.get('usage', {}).get('total_tokens')} · "
-        f"samples {extractor.get('samples_matched')}/{extractor.get('samples_total')}",
-        flush=True,
+    prediction_key_map = (
+        {"state_reviewed": "state_under_review"}
+        if is_records
+        else ({property_name: field} if property_name != field else {})
     )
+    score_property_names = ["state_under_review"] if is_records else [field]
+
+    author_request: dict[str, Any] = {"max_requests": max_requests}
+    round_entries: list[dict[str, Any]] = []
+    repair_info: dict[str, Any] | None = None
+    repair_spec: dict[str, Any] | None = None
+    responses: list[dict[str, Any]] = []
+
+    def round_entry(
+        index: int,
+        response: dict[str, Any],
+        prompt_text: str,
+        feedback: list[dict[str, Any]],
+        train_score: float | None,
+        validation_score: float | None,
+    ) -> dict[str, Any]:
+        extractor_payload = response["extractor"]
+        return {
+            "round": index,
+            "kind": "admin_agent_author" if index == 0 else "admin_agent_repair",
+            "model": response.get("model"),
+            "usage": response.get("usage") or {},
+            "validation_issues": [] if not response.get("validation") else [response["validation"]],
+            "train_score": train_score,
+            "train_nonexample_score": validation_score,
+            "validation_score": validation_score,
+            "code": extractor_payload["python_code"],
+            "response": extractor_payload.get("description") or "",
+            "transcript": response.get("transcript") or [],
+            "extractor": {
+                key: value for key, value in extractor_payload.items() if key != "python_code"
+            },
+            "empty_response": bool(response.get("empty_output")),
+            "selected_shared_ids": [record["doc_id"] for record in author_records],
+            "prompt": prompt_text,
+            "feedback": [
+                {
+                    "doc_id": example["doc_id"],
+                    "status": example["status"],
+                    "family": example["family"],
+                }
+                for example in feedback
+            ],
+        }
+
+    if not repair_enabled:
+        author_request, author = _author_once(
+            directory,
+            "author",
+            task_prompt,
+            author_records,
+            template,
+            dataset_id,
+            max_requests,
+        )
+        extractor = author["extractor"]
+        code = extractor["python_code"]
+        round_entries.append(
+            round_entry(0, author, task_prompt, [], None, None)
+        )
+    else:
+        assert repair_split is not None
+        feedback_ids = {str(record["doc_id"]) for record in feedback_records}
+        validation_ids = {str(record["doc_id"]) for record in validation_records}
+        documents = {str(record["doc_id"]): record for record in train_records}
+
+        def score_round(
+            index: int, source: str
+        ) -> tuple[list[dict[str, Any]], float | None, float | None]:
+            scored, _metrics, _predictions, _response = _execute_records(
+                directory,
+                f"execute_round{index}",
+                source,
+                train_records,
+                dataset_id=dataset_id,
+                fields=fields,
+                redact_properties=redact_properties,
+                no_metadata=no_metadata,
+                prediction_key_map=prediction_key_map,
+                score_property_names=score_property_names,
+            )
+            feedback_scored = [r for r in scored if r["doc_id"] in feedback_ids]
+            validation_scored = [r for r in scored if r["doc_id"] in validation_ids]
+            return (
+                scored,
+                _subset_score(dataset_id, fields, feedback_scored),
+                _subset_score(dataset_id, fields, validation_scored),
+            )
+
+        author_request, author = _author_once(
+            directory,
+            "author_round0",
+            task_prompt,
+            author_records,
+            template,
+            dataset_id,
+            max_requests,
+            round_index=0,
+        )
+        code = author["extractor"]["python_code"]
+        last_scored, feedback_score, validation_score = score_round(0, code)
+        responses.append(author)
+        rounds = [
+            round_entry(0, author, task_prompt, [], feedback_score, validation_score)
+        ]
+        best_index = 0
+        best_validation = validation_score
+        patience = 0
+        stop_reason = "max_rounds"
+        for round_index in range(1, repair_rounds + 1):
+            failures = repair.select_failures(
+                dataset_id,
+                last_scored,
+                feedback_ids=feedback_ids,
+                max_examples=repair_examples,
+                documents=documents,
+            )
+            if not failures:
+                stop_reason = "no_failures"
+                break
+            repair_prompt = repair.build_repair_prompt(
+                base_prompt=task_prompt,
+                current_code=code,
+                examples=failures,
+                round_index=round_index,
+                total_rounds=repair_rounds,
+            )
+            _, response = _author_once(
+                directory,
+                f"author_round{round_index}",
+                repair_prompt,
+                author_records,
+                template,
+                dataset_id,
+                max_requests,
+                round_index=round_index,
+            )
+            code = response["extractor"]["python_code"]
+            last_scored, feedback_score, validation_score = score_round(round_index, code)
+            responses.append(response)
+            rounds.append(
+                round_entry(
+                    round_index,
+                    response,
+                    repair_prompt,
+                    failures,
+                    feedback_score,
+                    validation_score,
+                )
+            )
+            improved = validation_score is not None and (
+                best_validation is None or validation_score > best_validation + 1e-9
+            )
+            if improved:
+                best_index = len(rounds) - 1
+                best_validation = validation_score
+                patience = 0
+            else:
+                patience += 1
+            if patience >= repair_patience:
+                stop_reason = "validation_plateau"
+                break
+
+        author = responses[best_index]
+        extractor = author["extractor"]
+        code = extractor["python_code"]
+        round_entries = rounds
+        repair_info = {
+            "enabled": True,
+            "rounds_requested": repair_rounds,
+            "rounds_run": len(rounds),
+            "examples_per_round": repair_examples,
+            "patience": repair_patience,
+            "validation_size": len(validation_ids),
+            "validation_ids": sorted(validation_ids),
+            "feedback_pool_ids": sorted(feedback_ids),
+            "split_digest": repair_split.digest,
+            "strata": repair_split.strata,
+            "best_round": best_index,
+            "best_validation": best_validation,
+            "stop_reason": stop_reason,
+            "round_scores": [
+                {
+                    "round": item["round"],
+                    "train_feedback": item["train_score"],
+                    "validation": item["validation_score"],
+                }
+                for item in rounds
+            ],
+        }
+        repair_spec = {
+            "enabled": True,
+            "rounds_requested": repair_rounds,
+            "examples_per_round": repair_examples,
+            "patience": repair_patience,
+            "validation_size": len(validation_ids),
+            "validation_ids": sorted(validation_ids),
+            "feedback_pool_ids": sorted(feedback_ids),
+            "split_digest": repair_split.digest,
+            "strata": repair_split.strata,
+        }
+        usage = _sidecar_usage(author)
+        usage["requests"] = sum(
+            int((item.get("usage") or {}).get("requests") or 0) for item in responses
+        )
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            usage[key] = sum(int((item.get("usage") or {}).get(key) or 0) for item in responses)
+        usage["rounds"] = [item.get("usage") or {} for item in responses]
+        print(
+            f"Repair: {len(rounds)} round(s), best round {best_index}, "
+            f"validation {best_validation if best_validation is None else f'{best_validation:.3f}'}, "
+            f"stop {stop_reason}",
+            flush=True,
+        )
 
     # The full Plan test split does not fit in one JSON request, so payloads are
     # streamed as JSONL: one document per line, built from the catalog one row at
@@ -559,12 +898,6 @@ def run(
     if not test_count:
         raise SystemExit("No test documents with segmentation found.")
 
-    prediction_key_map = (
-        {"state_reviewed": "state_under_review"}
-        if is_records
-        else ({property_name: field} if property_name != field else {})
-    )
-    score_property_names = ["state_under_review"] if is_records else [field]
     execute_request = {
         "mode": "execute",
         "extractor_source": code,
@@ -587,7 +920,8 @@ def run(
     predictions = {item["doc_id"]: item for item in execution.get("predictions") or []}
     samples = sample_meta
     scored_records, metrics = evaluate.score_records(dataset_id, fields, samples, predictions)
-    usage = _sidecar_usage(author)
+    if not repair_enabled:
+        usage = _sidecar_usage(author)
     metrics["token_usage"] = usage
     metrics["admin_eval"] = execution.get("admin_eval")
     metrics["admin_agent"] = {
@@ -606,13 +940,29 @@ def run(
         + ". The target property is removed from ctx.metadata at execution time. "
         "Authored on train documents only; executed once on the untouched test split."
     )
+    if repair_enabled and repair_info is not None:
+        validation_ids = set(repair_info["validation_ids"])
+        validation_scored = [
+            record for record in scored_records if record["doc_id"] in validation_ids
+        ]
+        metrics["validation"] = {
+            "score": _subset_score(dataset_id, fields, validation_scored),
+            "documents": len(validation_scored),
+            "status_counts": dict(Counter(record["status"] for record in validation_scored)),
+        }
+        metrics["repair"] = repair_info
+        metrics["method_notes"] += (
+            " REPAIR LOOP: the first authoring round saw only the feedback pool; a frozen "
+            "stratified validation slice was scored after every round, picked the best round, "
+            "and never appeared in an authoring/repair prompt."
+        )
 
     now = datetime.now(UTC).isoformat()
     model_slug = runs.slug(str(author.get("model") or "unknown"))
     prompt_slug = runs.slug(prompt_version).removeprefix("admin_agent_")
     selected_shared_ids = list(sampling_result.doc_ids)
     candidate_count = (
-        len(_candidate_values(dataset_id, property_type, train_records, field) or [])
+        len(_candidate_values(dataset_id, property_type, author_records, field) or [])
         if include_country_list
         else 0
     )
@@ -652,6 +1002,7 @@ def run(
             "limit_train": limit_train,
             "limit_test": limit_test,
         },
+        **({"repair": repair_spec} if repair_spec else {}),
         "candidate_list": {
             "included": include_country_list
             and dataset_id in {"upr_state", "upr_recommendations"},
@@ -680,6 +1031,8 @@ def run(
     }
     if replay_of:
         spec["replay_of"] = replay_of
+    if repair_info:
+        spec["repair_outcome"] = repair_info
     config = {
         "condition": "no_title",
         "prompt_version": prompt_version,
@@ -710,10 +1063,24 @@ def run(
         "max_requests": author_request["max_requests"],
         "extractor_samples_matched": extractor.get("samples_matched"),
         "extractor_samples_total": extractor.get("samples_total"),
-        "authoring_documents": len(train_records),
+        "authoring_documents": len(author_records),
         "execution_documents": len(train_records) + test_count,
         "request_files": str(directory),
     }
+    if repair_enabled and repair_info is not None:
+        config.update(
+            {
+                "repair_enabled": True,
+                "repair_rounds_requested": repair_info["rounds_requested"],
+                "repair_rounds_run": repair_info["rounds_run"],
+                "repair_examples_per_round": repair_info["examples_per_round"],
+                "repair_best_round": repair_info["best_round"],
+                "repair_stop_reason": repair_info["stop_reason"],
+                "repair_validation_documents": repair_info["validation_size"],
+                "repair_validation_ids": repair_info["validation_ids"],
+                "repair_feedback_pool_documents": len(repair_info["feedback_pool_ids"]),
+            }
+        )
     method = evaluate.build_method(
         method_id=method_id,
         name=f"Admin agent extractor — {dataset_id} ({prompt_version})",
@@ -744,29 +1111,15 @@ def run(
         "geometry": geometry,
     }
     method["spec_hash"] = spec_hash
-    attempt = {
-        "round": 1,
-        "kind": "admin_agent_author",
-        "model": author.get("model"),
-        "usage": usage,
-        "validation_issues": [] if not author.get("validation") else [author["validation"]],
-        "train_score": metrics["primary"]["train"],
-        "train_nonexample_score": None,
-        "code": code,
-        "response": extractor.get("description") or "",
-        "transcript": author.get("transcript") or [],
-        "extractor": {
-            key: value for key, value in extractor.items() if key != "python_code"
-        },
-        "empty_response": bool(author.get("empty_output")),
-        "selected_shared_ids": selected_shared_ids,
-        "sampling": sampling_result.to_spec(),
-    }
+    for item in round_entries:
+        item["sampling"] = sampling_result.to_spec()
+    if not repair_enabled:
+        round_entries[0]["train_score"] = metrics["primary"]["train"]
     runs.write_method(
         method,
         prompt=task_prompt,
         script=code,
-        attempts=[attempt],
+        attempts=round_entries,
         spec=spec,
     )
 
@@ -866,6 +1219,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Cap for the restricted sample policies (default 12).",
     )
     parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Opt-in repair loop: hold out a stratified validation slice (never shown to the "
+            "agent), feed 2-3 training failures back, re-author, keep the best round on "
+            "validation, run test once."
+        ),
+    )
+    parser.add_argument(
+        "--repair-rounds",
+        type=int,
+        default=3,
+        help="Maximum repair rounds after the initial authoring (default 3).",
+    )
+    parser.add_argument(
+        "--repair-examples",
+        type=int,
+        default=repair.DEFAULT_REPAIR_EXAMPLES,
+        help="Failures shown per repair round (default 3).",
+    )
+    parser.add_argument(
+        "--validation-size",
+        type=int,
+        default=repair.DEFAULT_VALIDATION_SIZE,
+        help="Requested validation documents (default 10; capped at ~20%% of train).",
+    )
+    parser.add_argument(
+        "--repair-patience",
+        type=int,
+        default=2,
+        help="Stop after this many rounds without validation improvement (default 2).",
+    )
+    parser.add_argument(
         "--replay",
         default=None,
         help="Replay a method from its spec.json (see --replay-mode).",
@@ -915,6 +1301,11 @@ def main(argv: list[str] | None = None) -> int:
         prompt_source_path=args.prompt_file,
         sampling_policy=args.sample_policy,
         sampling_size=args.sample_size,
+        repair_enabled=args.repair,
+        repair_rounds=args.repair_rounds,
+        repair_examples=args.repair_examples,
+        validation_size=args.validation_size,
+        repair_patience=args.repair_patience,
     )
     print(f"\nMethod: {result['method']['method_id']}", file=sys.stderr)
     return 0
@@ -1092,6 +1483,11 @@ def replay_author(method_id: str) -> dict[str, Any]:
     ``-r<timestamp>``) rather than overwriting the replayed method.
     """
     spec = _load_spec(method_id)
+    if (spec.get("repair") or {}).get("enabled"):
+        raise SystemExit(
+            "Repair methods support --replay execute only (the stored script is the final "
+            "round); re-authoring one round from prompt.txt would not reproduce the loop."
+        )
     prompt_path = runs.METHODS_DIR / method_id / "prompt.txt"
     if not prompt_path.exists():
         raise SystemExit(f"No prompt.txt for method {method_id!r}")
