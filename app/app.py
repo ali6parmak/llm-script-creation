@@ -221,6 +221,20 @@ def repair_rounds_value(
     return 0
 
 
+def method_attempts(method_id: str) -> list[dict[str, Any]]:
+    """Admin-agent authoring/repair rounds (stored on the method, not the run)."""
+    directory = run_artifacts.METHODS_DIR / method_id / "attempts"
+    if not directory.exists():
+        return []
+    attempts = []
+    for path in sorted(directory.glob("attempt-*.json")):
+        try:
+            attempts.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(attempts, key=lambda item: item.get("round", 0))
+
+
 def run_label(run: dict[str, Any]) -> str:
     return f"{run['run_id']} · {run['split']} · {run['status']}"
 
@@ -826,65 +840,118 @@ def render_method_detail(
         f"method `{run['method_id']}`"
     )
 
-    rounds = run_artifacts.list_rounds(run["run_id"])
     st.markdown("### Repair rounds")
-    if not rounds:
-        st.caption("No repair rounds: rule-based baseline, or the first script had no failures.")
-    else:
-        round_rows = [
-            {
-                "round": item.get("round"),
-                "kind": item.get("kind"),
-                "train": item.get("train_score"),
-                "non-example": item.get("train_nonexample_score"),
-                "failures": item.get("failure_count"),
-                "crashes": item.get("crash_count"),
-                "validation": "; ".join(item.get("validation_issues") or []) or "—",
-            }
-            for item in rounds
-        ]
-        show_table(
-            pd.DataFrame(round_rows),
-            metrics=["train", "non-example"],
-            height=220,
-            max_rows=10,
-        )
-        choice = st.selectbox(
-            "Inspect repair round",
-            [item.get("round") for item in rounds],
-            format_func=lambda value: next(
-                (
-                    f"round {item.get('round')} ({item.get('kind')}) · "
-                    f"train {fmt(item.get('train_score'))} · "
-                    f"non-example {fmt(item.get('train_nonexample_score'))}"
-                    for item in rounds
-                    if item.get("round") == value
+    is_admin = method.get("type") == "admin_agent_extractor"
+    attempts = method_attempts(method["method_id"]) if is_admin else []
+    if is_admin:
+        if len(attempts) <= 1 and repair_rounds_value(method, run) == 0:
+            st.caption("No repair rounds: the first script had no failures.")
+        else:
+            attempt_rows = [
+                {
+                    "round": item.get("round"),
+                    "kind": item.get("kind"),
+                    "failures fed": len(item.get("feedback") or []),
+                    "train (feedback)": item.get("train_score"),
+                    "validation": item.get("validation_score"),
+                    "requests": (item.get("usage") or {}).get("requests"),
+                }
+                for item in attempts
+            ]
+            show_table(
+                pd.DataFrame(attempt_rows),
+                metrics=["train (feedback)", "validation"],
+                height=220,
+                max_rows=10,
+            )
+            choice = st.selectbox(
+                "Inspect round",
+                [item.get("round") for item in attempts],
+                format_func=lambda value: next(
+                    (
+                        f"round {item.get('round')} ({item.get('kind')}) · "
+                        f"train {fmt(item.get('train_score'))} · "
+                        f"validation {fmt(item.get('validation_score'))}"
+                        for item in attempts
+                        if item.get("round") == value
+                    ),
+                    str(value),
                 ),
-                str(value),
-            ),
-            key=f"repair_round_{run['run_id']}",
-        )
-        round_dir = run_artifacts.RUNS_DIR / run["run_id"] / "rounds" / f"round-{choice}"
-        with st.expander("Round script, feedback and metrics", expanded=False):
-            if (round_dir / "script.py").exists():
-                st.code(
-                    (round_dir / "script.py").read_text(encoding="utf-8"),
-                    language="python",
-                )
-            if (round_dir / "feedback.txt").exists():
-                st.markdown("**Feedback used for this round**")
-                st.code(
-                    (round_dir / "feedback.txt").read_text(encoding="utf-8"),
-                    language="text",
-                )
-            selected_round = next(item for item in rounds if item.get("round") == choice)
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Train metrics (all 50)**")
-                show_json(selected_round.get("train_metrics", {}))
-            with right:
-                st.markdown("**Train metrics (non-example)**")
-                show_json(selected_round.get("train_nonexample_metrics", {}))
+                key=f"admin_repair_round_{run['run_id']}",
+            )
+            attempt = next(item for item in attempts if item.get("round") == choice)
+            with st.expander("Round script, prompt and feedback", expanded=False):
+                st.code(attempt.get("code") or "", language="python")
+                feedback = attempt.get("feedback") or []
+                if feedback:
+                    st.markdown("**Failures fed to this round**")
+                    show_table(
+                        pd.DataFrame(feedback),
+                        height=180,
+                        max_rows=20,
+                    )
+                prompt_text = attempt.get("prompt")
+                if prompt_text:
+                    st.text_area("Round prompt", prompt_text, height=240)
+    else:
+        rounds = run_artifacts.list_rounds(run["run_id"])
+        if not rounds:
+            st.caption("No repair rounds: rule-based baseline, or the first script had no failures.")
+        else:
+            round_rows = [
+                {
+                    "round": item.get("round"),
+                    "kind": item.get("kind"),
+                    "train": item.get("train_score"),
+                    "non-example": item.get("train_nonexample_score"),
+                    "failures": item.get("failure_count"),
+                    "crashes": item.get("crash_count"),
+                    "validation": "; ".join(item.get("validation_issues") or []) or "—",
+                }
+                for item in rounds
+            ]
+            show_table(
+                pd.DataFrame(round_rows),
+                metrics=["train", "non-example"],
+                height=220,
+                max_rows=10,
+            )
+            choice = st.selectbox(
+                "Inspect repair round",
+                [item.get("round") for item in rounds],
+                format_func=lambda value: next(
+                    (
+                        f"round {item.get('round')} ({item.get('kind')}) · "
+                        f"train {fmt(item.get('train_score'))} · "
+                        f"non-example {fmt(item.get('train_nonexample_score'))}"
+                        for item in rounds
+                        if item.get("round") == value
+                    ),
+                    str(value),
+                ),
+                key=f"repair_round_{run['run_id']}",
+            )
+            round_dir = run_artifacts.RUNS_DIR / run["run_id"] / "rounds" / f"round-{choice}"
+            with st.expander("Round script, feedback and metrics", expanded=False):
+                if (round_dir / "script.py").exists():
+                    st.code(
+                        (round_dir / "script.py").read_text(encoding="utf-8"),
+                        language="python",
+                    )
+                if (round_dir / "feedback.txt").exists():
+                    st.markdown("**Feedback used for this round**")
+                    st.code(
+                        (round_dir / "feedback.txt").read_text(encoding="utf-8"),
+                        language="text",
+                    )
+                selected_round = next(item for item in rounds if item.get("round") == choice)
+                left, right = st.columns(2)
+                with left:
+                    st.markdown("**Train metrics (all 50)**")
+                    show_json(selected_round.get("train_metrics", {}))
+                with right:
+                    st.markdown("**Train metrics (non-example)**")
+                    show_json(selected_round.get("train_nonexample_metrics", {}))
 
     records = load_predictions(run["run_id"])
     samples = load_samples(method.get("dataset_id", "")).copy()
