@@ -751,9 +751,91 @@ New UPR recommendation detail (with country list): P 0.971 / R 0.971 / **F1 0.97
   This is exactly the problem the sampling-policy experiment should address.
 
 **Status:** the canonical set is re-created and self-contained; the old admin results are
-archived. Next: repeat the key conditions to estimate variance, then compare sampling policies
-(agent-chosen vs coverage/similarity) under specs. The full `GenerateScriptUseCase`
-bulk-script path remains out of scope.
+archived. The authoring-sample A/B is done (below): restricting the universe to 12 coverage
+documents helps UPR recommendations slightly and costs less authoring, but hurts Plan
+classification because the extractor calibrates on the biased sample. Next: a
+prior-preserving/target-stratified sampler, then repeats of the key conditions. The full
+`GenerateScriptUseCase` bulk-script path remains out of scope.
+
+### Authoring-sample policies (2026-11-23)
+
+**Problem.** With policy `agent` the authoring request contains all 50 train documents and the
+extractor picks its own 8–12 with no coverage guarantee, so the same prompt can sample a
+different evidence set on every run (see the `plan_means_of_adoption` 0.709→0.484 swing
+above). `sampling.py` now offers deterministic restrictions of the authoring universe, train
+only, with the prompt's source/`ctx` contract unchanged:
+
+| Policy | Authoring universe |
+|---|---|
+| `agent` (default) | all 50 train docs; the extractor still discovers and peeks 8–12 itself |
+| `coverage` | ≤12: rare-first greedy cover of document_type/body/legal_status (cycle for UPR), page/character/paragraph buckets, header patterns A/RES, A/HRC, Distr., Report of, No. NN, and hard flags |
+| `similarity` | ≤12: TF-IDF over first-page words + structural tokens, farthest-first (k-center) |
+| `hybrid` | ≤12: 6 coverage representatives, then 6 farthest-first seeded from them; force-includes one target-absent negative and one hard structural case when the universe has one |
+
+Hard cases are shared PDFs (same file/name/content, or the same page+character count for
+large documents), multi-entry compilations, OCR/mojibake, and UPR sub-numbered /
+multi-country recommendations. Gold is read only to recognise target-absent negatives and
+those UPR record hard cases; no gold value is written into the prompt.
+
+The selected ids, a per-document signature, stratum coverage and hard cases go into
+`spec.json` under `sampling.*`. The method id hashes the spec, so every selection is an
+immutable method. Restricted policies add a short "sample broadly, not just the first two"
+note to the task and a `-sample-<policy>` prompt-version suffix. Replay rebuilds the stored
+ids (`sampling.restrict_documents`) and never re-samples.
+
+**A/B design (no title + `--no-metadata`, country list on for UPR).** Tasks
+`plan_document_type`, `upr_recommendations`, `plan_year`; `agent` vs `hybrid`, 3 authoring
+runs per arm. `scripts/admin_sampling_ab.py` reads the specs, runs and attempt transcripts and
+reports test score mean/min/max, wrong+missing counts, author requests/tokens, selected-sample
+strata and pairwise diversity, and the documents the extractor actually peeked at.
+
+**Results and caveats.** 18 runs (3 per arm per dataset), frozen condition no title +
+`--no-metadata`, country list on for UPR. Full tables in `reports/admin_sampling_ab.md`
+(regenerate with `scripts/admin_sampling_ab.py`). Means with [min–max] over the three runs:
+
+| Dataset | Metric | `agent` (50) | `hybrid` (12) | Δ mean |
+|---|---|---:|---:|---:|
+| `plan_document_type` | accuracy | **0.919** [0.889–0.953] | 0.692 [0.546–0.813] | −0.227 |
+| `plan_year` | accuracy | **0.925** [0.920–0.927] | 0.860 [0.798–0.931] | −0.064 |
+| `upr_recommendations` | F1 | 0.973 [0.962–0.982] | **0.977** [0.976–0.980] | +0.005 |
+
+Wrong+missing per test split, author requests and tokens (means): `plan_document_type`
+221.7 / 21.0 / 4.41M vs 840.3 / 15.3 / 1.70M; `plan_year` 751.7 / 14.7 / 1.37M vs 1394.0 /
+13.0 / 2.26M; `upr_recommendations` 0 / 12.3 / 1.78M vs 0 / 9.7 / 1.33M. Hybrid halves
+authoring tokens on document type and cuts requests on UPR, but it is not a uniform cost win
+(plan year tokens are higher).
+
+**The restriction hurts property classification, and the mechanism is visible.** The 12-doc
+universe over-represents rare classes and layouts, and the admin extractor calibrates with
+`benchmark_extractor` over that same universe, so it fits the biased sample:
+
+- `plan_document_type`: hybrid selected 4 Resolutions of 12 (universe: 28/50). Two extractors
+  over-predicted rare classes badly — one predicted `Declaration / Confererence outcome
+  document` 484 times for 11 true test documents; another predicted `Special Procedures'
+  report` 860 times for 552. Train stayed at 0.917–1.000 while test fell to 0.546–0.813.
+- `plan_year`: hybrid selected no 1940s/1950s/1970s and only one 1990s document. 1990s test
+  accuracy was 0.486 (38% missing) vs 0.914 (2% missing) for `agent`; 2000s/2010s/2020s were
+  nearly identical. The missing decades are exactly the target classes the sampler does not
+  cover.
+- `upr_recommendations`: hybrid selected no `recs300+` document, yet F1 is flat/slightly
+  better and authoring is cheaper. The list extractor is less sensitive to the document
+  prior.
+- Peeking: on the Plan tasks the extractor sampled 9–17 documents under `agent` and 4–12
+  under `hybrid`; UPR peeks were 4 vs 3–5. All peeks stayed inside the selected universe. The
+  hybrid order is rare-first, so a run that peeks only 4/12 can miss common Resolutions
+  entirely; one such run is the 0.546 outlier.
+
+**Caveat on the negative slot.** The v2 train pools contain only documents with non-empty
+gold, so no target-absent negative exists (the spec records `negatives: []` and a note). The
+forced hard case is a shared PDF / 209-page compilation for the Plan datasets and a
+sub-numbered recommendation document for UPR.
+
+**Takeaway.** The static coverage sampler as specified is not an accuracy win for property
+extraction; it trades the true class/label prior for layout/class breadth. The next iteration
+should add target strata (year decade, recommendation-count bucket) and/or preserve the prior
+(e.g. 6 rare + 6 proportional documents) and test ordering (put a common representative first,
+then hard cases). The active second pass remains appropriate for properties and UPR state,
+not for recommendation lists.
 
 ### What the v2 numbers show
 

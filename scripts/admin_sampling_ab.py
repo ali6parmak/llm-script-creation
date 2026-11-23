@@ -53,9 +53,15 @@ def _latest_run(method_id: str) -> dict[str, Any] | None:
     candidates = [
         run
         for run in runs.list_runs()
-        if run.get("method_id") == method_id and run.get("split") == "train_test"
+        if run.get("method_id") == method_id
+        and run.get("split") == "train_test"
+        and run.get("status") == "completed"
     ]
-    return candidates[0] if candidates else None
+    # A replay run reuses the method but has no author usage: prefer the
+    # original authoring run when both exist.
+    original = [run for run in candidates if not (run.get("metrics") or {}).get("replay")]
+    pool = original or candidates
+    return sorted(pool, key=lambda run: run.get("run_id", ""))[-1] if pool else None
 
 
 def _peeks(method_id: str) -> list[dict[str, str]]:
@@ -126,6 +132,50 @@ def _selected_documents(spec: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
+_GOLD_CACHE: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+def _train_gold(dataset_id: str) -> dict[str, dict[str, Any]]:
+    """Selected-document gold, for descriptive target-class coverage only."""
+    if dataset_id in _GOLD_CACHE:
+        return _GOLD_CACHE[dataset_id]
+    gold: dict[str, dict[str, Any]] = {}
+    conn = catalog.connect()
+    try:
+        for sample in catalog.iter_samples(conn, dataset_id, split="train"):
+            gold[str(sample["doc_id"])] = json.loads(sample["gold_json"] or "{}")
+    except OSError:
+        pass
+    finally:
+        conn.close()
+    _GOLD_CACHE[dataset_id] = gold
+    return gold
+
+
+def _target_class(dataset_id: str, gold: dict[str, Any]) -> str:
+    """A compact target stratum, only for describing what a sample covers."""
+    if dataset_id == "upr_recommendations":
+        count = len(gold.get("recommendations") or [])
+        if count < 150:
+            return "recs<150"
+        if count < 200:
+            return "recs150-199"
+        if count < 250:
+            return "recs200-249"
+        if count < 300:
+            return "recs250-299"
+        return "recs300+"
+    field = dataset_id.removeprefix("plan_")
+    value = gold.get(field)
+    if field == "year":
+        try:
+            decade = int(value) // 10 * 10
+            return f"{decade}s"
+        except (TypeError, ValueError):
+            return "unknown"
+    return str(value) if value is not None else "missing"
+
+
 # ---------------------------------------------------------------------------
 # Derived quantities
 
@@ -173,6 +223,15 @@ def _strata(documents: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _target_counts(
+    dataset_id: str, doc_ids: list[str], gold: dict[str, dict[str, Any]]
+) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for doc_id in set(doc_ids):
+        counts[_target_class(dataset_id, gold.get(doc_id, {}))] += 1
+    return dict(sorted(counts.items()))
+
+
 def _observation(
     method: dict[str, Any], spec: dict[str, Any], run: dict[str, Any], peeks: list[dict[str, str]]
 ) -> dict[str, Any]:
@@ -185,10 +244,15 @@ def _observation(
     documents = _selected_documents(spec)
     peeked = [call["doc_id"] for call in peeks]
     peeked_selected = [doc_id for doc_id in peeked if doc_id in set(selected)]
+    gold = _train_gold(str(spec.get("dataset_id")))
+    target_classes = _target_counts(str(spec.get("dataset_id")), selected, gold)
+    peeked_target_classes = _target_counts(str(spec.get("dataset_id")), peeked, gold)
     first_two = selected[:2]
+    documents_by_id = {document["doc_id"]: document for document in documents}
+    peeked_documents = [documents_by_id[doc_id] for doc_id in set(peeked) if doc_id in documents_by_id]
     return {
         "method_id": method["method_id"],
-        "short_id": method["method_id"][-8:],
+        "short_id": f"{str(spec.get('spec_hash') or '')[:8]}@{str(spec.get('created_at') or '')[11:19]}",
         "dataset_id": spec.get("dataset_id"),
         "policy": (spec.get("sampling") or {}).get("policy"),
         "prompt_version": spec.get("prompt_version"),
@@ -208,11 +272,15 @@ def _observation(
         "selected_documents": documents,
         "universe": (spec.get("sampling") or {}).get("universe_documents"),
         "peeks": peeked,
+        "peeked": peeked,
         "peeked_distinct": len(set(peeked)),
         "peeked_selected": peeked_selected,
         "first_two_peeks": sum(1 for doc_id in peeked if doc_id in first_two),
         "pairwise_distance": _pairwise_distance(documents),
+        "peeked_pairwise_distance": _pairwise_distance(peeked_documents),
         "strata": _strata(documents),
+        "target_classes": target_classes,
+        "peeked_target_classes": peeked_target_classes,
     }
 
 
@@ -254,7 +322,7 @@ def build_report(observations: list[dict[str, Any]]) -> str:
     lines += [
         "## Runs",
         "",
-        "| Dataset | Policy | Method | Test | Train | Hit | Wrong | Missing | Requests | Tokens | Peeked docs | Pairwise dist |",
+        "| Dataset | Policy | Method | Test | Train | Hit | Wrong | Missing | Requests | Tokens | Peeked docs | Selected dist |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for obs in sorted(observations, key=lambda item: (item["dataset_id"], item["policy"], item["created_at"])):
@@ -281,7 +349,7 @@ def build_report(observations: list[dict[str, Any]]) -> str:
     lines += [
         "## Policy summary (per dataset)",
         "",
-        "| Dataset | Policy | n | Test mean | min | max | Harms (wrong+missing) | Requests | Tokens | Peeked docs | Pairwise dist |",
+        "| Dataset | Policy | n | Test mean | min | max | Harms (wrong+missing) | Requests | Tokens | Peeked docs | Peeked pairwise dist |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -301,7 +369,7 @@ def build_report(observations: list[dict[str, Any]]) -> str:
                 requests=_fmt(_mean([obs["requests"] for obs in group])),
                 tokens=_fmt(_mean([obs["tokens"] for obs in group])),
                 peeked=_fmt(_mean([obs["peeked_distinct"] for obs in group]), 1),
-                distance=_fmt(_mean([obs["pairwise_distance"] for obs in group])),
+                distance=_fmt(_mean([obs["peeked_pairwise_distance"] for obs in group])),
             )
         )
     lines.append("")
@@ -326,10 +394,31 @@ def build_report(observations: list[dict[str, Any]]) -> str:
     lines.append("")
 
     lines += [
+        "## Target-label spread of the selected docs",
+        "",
+        "Descriptive only (the sampler does not use the target value; metadata/layout/hard "
+        "cases drive it). For `plan_year` this shows whether a selection misses decades.",
+        "",
+        "| Dataset | Policy | Method | Selected target classes |",
+        "|---|---|---|---|",
+    ]
+    for obs in sorted(observations, key=lambda item: (item["dataset_id"], item["policy"], item["created_at"])):
+        lines.append(
+            "| {dataset} | {policy} | `{method}` | {classes} |".format(
+                dataset=obs["dataset_id"],
+                policy=obs["policy"],
+                method=obs["short_id"],
+                classes=", ".join(f"{key}×{value}" for key, value in obs["target_classes"].items())
+                or "—",
+            )
+        )
+    lines.append("")
+
+    lines += [
         "## What the extractor peeked at",
         "",
-        "| Dataset | Policy | Method | Peek calls | Distinct docs | In selected universe | First-two docs | Peeked metadata classes | Peeked headers |",
-        "|---|---|---|---:|---:|---:|---:|---|---|",
+        "| Dataset | Policy | Method | Peek calls | Distinct docs | In selected universe | First-two docs | Peeked metadata classes | Peeked headers | Peeked target classes |",
+        "|---|---|---|---:|---:|---:|---:|---|---|---|",
     ]
     for obs in sorted(observations, key=lambda item: (item["dataset_id"], item["policy"], item["created_at"])):
         documents_by_id = {document["doc_id"]: document for document in obs["selected_documents"]}
@@ -340,7 +429,7 @@ def build_report(observations: list[dict[str, Any]]) -> str:
         classes = sum(len(values) for values in peeked_strata["metadata"].values())
         lines.append(
             "| {dataset} | {policy} | `{method}` | {calls} | {distinct} | {inside}/{selected} | {first_two} | "
-            "{classes} | {headers} |".format(
+            "{classes} | {headers} | {targets} |".format(
                 dataset=obs["dataset_id"],
                 policy=obs["policy"],
                 method=obs["short_id"],
@@ -351,6 +440,10 @@ def build_report(observations: list[dict[str, Any]]) -> str:
                 first_two=obs["first_two_peeks"],
                 classes=classes,
                 headers=", ".join(peeked_strata["headers"]) or "—",
+                targets=", ".join(
+                    f"{key}×{value}" for key, value in obs["peeked_target_classes"].items()
+                )
+                or "—",
             )
         )
     lines.append("")
@@ -382,6 +475,21 @@ def build_report(observations: list[dict[str, Any]]) -> str:
 # CLI
 
 
+def _parse_since(raw: str | None) -> tuple[datetime | None, dict[str, datetime]]:
+    global_since = None
+    by_dataset: dict[str, datetime] = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" in item:
+            dataset_id, timestamp = item.split("=", 1)
+            by_dataset[dataset_id.strip()] = datetime.fromisoformat(timestamp.strip())
+        else:
+            global_since = datetime.fromisoformat(item)
+    return global_since, by_dataset
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -397,7 +505,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--since",
         default=None,
-        help="only specs created at/after this ISO timestamp (e.g. 2026-11-23T17:00:00+00:00)",
+        help=(
+            "only specs created at/after this ISO timestamp; accepts either one value or "
+            "comma-separated dataset=timestamp pairs "
+            "(e.g. upr_recommendations=2026-11-23T13:56:36+00:00)"
+        ),
     )
     parser.add_argument(
         "--methods",
@@ -413,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
 
     datasets = {item.strip() for item in args.datasets.split(",") if item.strip()}
     policies = {item.strip() for item in args.policies.split(",") if item.strip()}
-    since = datetime.fromisoformat(args.since) if args.since else None
+    global_since, since_by_dataset = _parse_since(args.since)
     explicit = {item.strip() for item in (args.methods or "").split(",") if item.strip()}
 
     observations: list[dict[str, Any]] = []
@@ -433,7 +545,8 @@ def main(argv: list[str] | None = None) -> int:
             if any(condition.get(key) != value for key, value in CONDITION.items()):
                 continue
             created_at = spec.get("created_at")
-            if since is not None and created_at and datetime.fromisoformat(created_at) < since:
+            threshold = since_by_dataset.get(str(spec.get("dataset_id")), global_since)
+            if threshold is not None and created_at and datetime.fromisoformat(created_at) < threshold:
                 continue
         run = _latest_run(method_id)
         if run is None:
