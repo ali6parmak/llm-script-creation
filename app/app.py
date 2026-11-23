@@ -295,7 +295,7 @@ def method_card(
         {badge(method.get("dataset_id", ""), PALETTE["blue"])}
         {badge(model.replace(":cloud", ""), PALETTE["gray"])}
         {badge(f"{examples} ex", PALETTE["aqua"])}
-        {badge(f"{repair_rounds} repairs", PALETTE["orange"])}
+        {badge(f"{repair_rounds} {'repair' if repair_rounds == 1 else 'repairs'}", PALETTE["orange"])}
       </div>
       <div class="uw-card-desc" style="margin-top:8px">{description}</div>
       <div class="uw-stat-row">
@@ -1148,13 +1148,18 @@ def page_methods(datasets: list[dict[str, Any]], run_index: list[dict[str, Any]]
 
     st.markdown('<div class="uw-divider"></div>', unsafe_allow_html=True)
     st.subheader("Method detail")
+    def method_option_label(value: str) -> str:
+        method = next((item for item in methods if item["method_id"] == value), None)
+        if method is None:
+            return value
+        rounds = repair_rounds_value(method, latest_run(value, run_index))
+        noun = "repair" if rounds == 1 else "repairs"
+        return f"{method.get('name', value)} · {value[-8:]} · {rounds} {noun}"
+
     selected = st.selectbox(
         "Open method",
         [method["method_id"] for method in methods],
-        format_func=lambda value: next(
-            (method.get("name", value) for method in methods if method["method_id"] == value),
-            value,
-        ),
+        format_func=method_option_label,
     )
     method = next(item for item in methods if item["method_id"] == selected)
     render_method_detail(method, dataset, run_index, selected)

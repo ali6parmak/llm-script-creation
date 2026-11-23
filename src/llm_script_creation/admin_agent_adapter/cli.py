@@ -1448,6 +1448,11 @@ def replay_execute(method_id: str) -> dict[str, Any]:
     predictions = {item["doc_id"]: item for item in execution.get("predictions") or []}
     scored_records, metrics = evaluate.score_records(dataset_id, fields, sample_meta, predictions)
     usage = {"replay": "execute"}
+    repair_rounds = 0
+    if (spec.get("repair") or {}).get("enabled"):
+        outcome = spec.get("repair_outcome") or {}
+        repair_rounds = max(0, int(outcome.get("rounds_run") or 0) - 1)
+    metrics["repair_rounds"] = repair_rounds
     metrics["token_usage"] = usage
     metrics["admin_eval"] = execution.get("admin_eval")
     metrics["replay"] = {
@@ -1468,6 +1473,7 @@ def replay_execute(method_id: str) -> dict[str, Any]:
         metrics=metrics,
         manifest=dataset["manifest"],
         usage=usage,
+        repair_rounds=repair_rounds,
     )
     prompt_path = runs.METHODS_DIR / method_id / "prompt.txt"
     prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else None
