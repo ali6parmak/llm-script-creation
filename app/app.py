@@ -154,6 +154,36 @@ def show_table(
         st.caption(f"Showing {max_rows:,} of {len(frame):,} rows.")
 
 
+def interactive_table(
+    frame: pd.DataFrame,
+    *,
+    key: str,
+    status: bool = False,
+    metrics: list[str] | None = None,
+    height: int | str = "auto",
+    selectable: bool = False,
+) -> Any:
+    """Sortable dataframe; optionally single-row selectable (click to open)."""
+    if frame.empty:
+        st.caption("No rows.")
+        return None
+    styled = table_style(
+        frame,
+        status_column="status" if status else None,
+        metric_columns=metrics,
+    )
+    kwargs: dict[str, Any] = {
+        "width": "stretch",
+        "height": height,
+        "hide_index": True,
+        "key": key,
+    }
+    if selectable:
+        kwargs["on_select"] = "rerun"
+        kwargs["selection_mode"] = "single-row"
+    return st.dataframe(styled, **kwargs)
+
+
 def paginate(frame: pd.DataFrame, page_size: int, key: str) -> pd.DataFrame:
     pages = max(1, math.ceil(len(frame) / page_size))
     page = st.selectbox(
@@ -809,11 +839,12 @@ def method_comparison_table(
         "description",
     ]
     frame = pd.DataFrame(rows)[columns]
-    show_table(
+    st.caption("Click a column header to sort. Click again to reverse.")
+    interactive_table(
         frame,
+        key=f"method_comparison_{dataset.get('dataset_id', 'dataset')}",
         metrics=["train", "test", "gap"],
         height=440,
-        max_rows=50,
     )
 
 
@@ -1028,30 +1059,37 @@ def render_method_detail(
     ]
     st.markdown(
         f'<div class="uw-section-note">{len(filtered):,} samples · '
-        f"{len(records):,} predictions loaded. Select a sample below.</div>",
+        f"{len(records):,} predictions loaded. Click a row to open a sample.</div>",
         unsafe_allow_html=True,
     )
-    page_rows = paginate(filtered, 50, key=f"method_{selected}")
-    show_table(
-        page_rows[display_columns],
-        status=True,
-        metrics=["f1"],
-        height=340,
-        max_rows=50,
-    )
+    page_key = f"method_{selected}"
+    page_rows = paginate(filtered, 50, key=page_key)
     if page_rows.empty:
         st.info("No samples match the filters.")
         return
+    page_number = int(st.session_state.get(f"page_{page_key}", 1))
+    display = page_rows[display_columns].reset_index(drop=True)
+    table = interactive_table(
+        display,
+        key=(
+            f"method_predictions_{selected}_{status_filter}_"
+            f"{search}_{page_number}"
+        ),
+        status=True,
+        metrics=["f1"],
+        height=340,
+        selectable=True,
+    )
+    st.caption("Click a column header to sort; click a row to open that sample.")
+    selected_rows = getattr(getattr(table, "selection", None), "rows", None) or []
     options = page_rows["doc_id"].tolist()
     previous = st.session_state.get(f"method_doc_{selected}")
-    index = options.index(previous) if previous in options else 0
-    titles = dict(zip(page_rows["doc_id"], page_rows["title"], strict=False))
-    doc_id = st.selectbox(
-        "Select sample",
-        options,
-        index=index,
-        format_func=lambda value: titles.get(value, value),
-    )
+    if selected_rows and 0 <= int(selected_rows[0]) < len(page_rows):
+        doc_id = str(page_rows.iloc[int(selected_rows[0])]["doc_id"])
+    elif previous in options:
+        doc_id = str(previous)
+    else:
+        doc_id = str(options[0])
     st.session_state[f"method_doc_{selected}"] = doc_id
 
     sample = samples[samples["doc_id"] == doc_id].iloc[0]
