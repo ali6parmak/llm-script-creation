@@ -810,6 +810,8 @@ only, with the prompt's source/`ctx` contract unchanged:
 | `coverage` | ≤12: rare-first greedy cover of document_type/body/legal_status (cycle for UPR), page/character/paragraph buckets, header patterns A/RES, A/HRC, Distr., Report of, No. NN, and hard flags |
 | `similarity` | ≤12: TF-IDF over first-page words + structural tokens, farthest-first (k-center) |
 | `hybrid` | ≤12: 6 coverage representatives, then 6 farthest-first seeded from them; force-includes one target-absent negative and one hard structural case when the universe has one |
+| `balanced` | ≤12: 6 typical documents allocated proportionally to the target stratum (preserves the class prior), then 6 rare/hard documents (rare strata + structural hard cases); typical block first |
+| `balanced_rare_first` | same document set as `balanced`, but the rare/hard block is first (ordering control) |
 
 Hard cases are shared PDFs (same file/name/content, or the same page+character count for
 large documents), multi-entry compilations, OCR/mojibake, and UPR sub-numbered /
@@ -875,6 +877,30 @@ should add target strata (year decade, recommendation-count bucket) and/or prese
 (e.g. 6 rare + 6 proportional documents) and test ordering (put a common representative first,
 then hard cases). The active second pass remains appropriate for properties and UPR state,
 not for recommendation lists.
+
+**Balanced 6+6 follow-up (2026-11-24).** That next iteration was implemented and run under the
+v3 split: `balanced` = 6 typical documents (proportional to the target stratum) + 6 rare/hard
+documents (rare strata + structural hard cases), with the typical block first;
+`balanced_rare_first` is the same document set with the rare/hard block first. Three authoring
+runs per arm per dataset, same no-title + `--no-metadata` condition. Full tables in
+`reports/admin_sampling_ab.md`.
+
+| Dataset | Metric | `agent` | `hybrid` | `balanced` (6+6) | `balanced_rare_first` |
+|---|---|---:|---:|---:|---:|
+| `plan_document_type_v3` | accuracy | **0.905** [0.893–0.929] | 0.805 [0.610–0.915] | 0.896 [0.869–0.916] | 0.863 [0.812–0.907] |
+| `plan_year_v3` | accuracy | 0.915 [0.863–0.943] | **0.941** [0.939–0.944] | 0.936 [0.933–0.940] | 0.931 [0.926–0.935] |
+| `upr_recommendations_v3` | F1 | **0.948** [0.941–0.955] | 0.948 [0.935–0.957] | 0.918 [0.859–0.956] | 0.637 [0.000–0.966] |
+
+**Findings.** Common-first 6+6 almost closes the document-type gap (−0.010 vs agent) and
+beats agent on year (+0.021), but does not beat agent on UPR (−0.029). It is not a cost win:
+requests are lower on document type (14.0 vs 17.3) but higher on year (14.7 vs 13.7), and
+tokens are similar or higher. **Ordering matters:** the two v3 arms use the identical document
+set and differ only in order; rare-first is worse on every dataset, and one rare-first UPR run
+returned `None` on every test document (0.000) after calibrating on the rare/hard block. So
+the prior-preserving half helps, but putting rare/hard documents first still recreates the
+original failure. **Decision:** keep `agent` as the default; `balanced` is only a fallback when
+the train pool must be restricted, and `balanced_rare_first` should not be used. `hybrid` stays
+historical/comparison-only.
 
 ### Repair loop (2026-11-23, opt-in)
 

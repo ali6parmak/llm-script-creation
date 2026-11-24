@@ -178,7 +178,9 @@ the API key. Do not add `.env` to artifacts. `.env` is gitignored.
 
 The v2 benchmark is frozen and v3-200train is built beside it (same catalog, `_v3` ids,
 viewer split-version filter). v3 results are in `PLAN.md` §14: the authoring-sample A/B and
-repair matrix were rerun under v3. Next work:
+repair matrix were rerun under v3, and the 6-typical + 6-rare/hard `balanced` sampler was
+tested (common-first is close to all-train on document type, better on year, worse on UPR;
+rare-first ordering is rejected). Next work:
 
 1. Repeat the v3 large-gain repair cells (means, field document number, field month) — the
    three seeds show large authoring variance.

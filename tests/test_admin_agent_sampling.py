@@ -246,3 +246,139 @@ def test_prompt_sample_note_is_optional_and_keeps_the_contract() -> None:
     )
     assert note in recommendations
     assert '`"\\n".join(p["text"] for p in seg["paragraphs"])`' in recommendations
+
+
+def _typed_docs() -> list[dict]:
+    docs = [
+        _doc(
+            f"res{index}",
+            first_page=f"A/RES/70/{index} resolution text",
+            gold={"document_type": "Resolution"},
+        )
+        for index in range(30)
+    ]
+    docs += [
+        _doc(
+            f"sp{index}",
+            first_page=f"A/HRC/45/{index} special procedures report text",
+            gold={"document_type": "Special Procedures' report"},
+        )
+        for index in range(10)
+    ]
+    docs += [
+        _doc(
+            f"ex{index}",
+            first_page=f"E/CN.4/{index} ExCom conclusion text",
+            gold={"document_type": "ExCom Conclusion"},
+        )
+        for index in range(4)
+    ]
+    docs += [
+        _doc(
+            f"reg{index}",
+            first_page=f"OAS/Ser.L/{index} regional treaty text",
+            gold={"document_type": "Regional treaty"},
+        )
+        for index in range(2)
+    ]
+    docs.append(
+        _doc(
+            "hard-compilation",
+            first_page="Conclusions adopted by the Executive Committee",
+            pages=45,
+            gold={"document_type": "Regional treaty"},
+        )
+    )
+    return docs
+
+
+def test_balanced_selects_six_typical_and_six_rare_hard() -> None:
+    docs = _typed_docs()
+
+    result = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+
+    assert len(result.doc_ids) == sampling.DEFAULT_SIZE == 12
+    selection = result.selection
+    assert selection is not None
+    assert selection["order"] == "common_first"
+    assert len(selection["common_ids"]) == 6
+    assert len(selection["rare_ids"]) == 6
+    assert list(result.doc_ids) == selection["common_ids"] + selection["rare_ids"]
+    # The typical half preserves the corpus prior: Resolution dominates.
+    assert selection["common_target_strata"]["Resolution"] >= 3
+    # The rare half includes a genuinely rare class and a hard structural case.
+    rare_golds = {doc["gold"]["document_type"] for doc in docs if doc["doc_id"] in selection["rare_ids"]}
+    assert rare_golds & {"ExCom Conclusion", "Regional treaty"}
+    assert "hard-compilation" in selection["hard_ids"]
+
+
+def test_balanced_rare_first_flips_only_the_order() -> None:
+    docs = _typed_docs()
+
+    common = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+    rare_first = sampling.sample_documents(
+        "plan_document_type", docs, policy="balanced_rare_first"
+    )
+
+    assert common.selection["common_ids"] == rare_first.selection["common_ids"]
+    assert common.selection["rare_ids"] == rare_first.selection["rare_ids"]
+    assert common.selection["hard_ids"] == rare_first.selection["hard_ids"]
+    assert rare_first.selection["order"] == "rare_first"
+    assert list(rare_first.doc_ids) == (
+        rare_first.selection["rare_ids"] + rare_first.selection["common_ids"]
+    )
+    assert rare_first.doc_ids[0] in rare_first.selection["rare_ids"]
+
+
+def test_balanced_is_deterministic_and_order_independent() -> None:
+    docs = _typed_docs()
+    first = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+    second = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+    reversed_result = sampling.sample_documents(
+        "plan_document_type", list(reversed(docs)), policy="balanced"
+    )
+
+    assert first.doc_ids == second.doc_ids == reversed_result.doc_ids
+    assert first.selection == second.selection == reversed_result.selection
+
+
+def test_balanced_respects_size_and_dedupes_shared_pdfs() -> None:
+    docs = _typed_docs() + [
+        _doc(
+            "twin-a",
+            first_page="Shared regional treaty body",
+            gold={"document_type": "Regional treaty"},
+            file_id="dup",
+            filename="a.pdf",
+        ),
+        _doc(
+            "twin-b",
+            first_page="Shared regional treaty body",
+            gold={"document_type": "Regional treaty"},
+            file_id="dup",
+            filename="a.pdf",
+        ),
+    ]
+
+    sized = sampling.sample_documents("plan_document_type", docs, policy="balanced", size=4)
+    full = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+
+    assert len(sized.doc_ids) == 4
+    assert len(sized.selection["common_ids"]) == 2
+    assert len(sized.selection["rare_ids"]) == 2
+    assert len({"twin-a", "twin-b"} & set(full.doc_ids)) <= 1
+    assert full.to_spec()["selection"]["order"] == "common_first"
+
+
+def test_balanced_prompt_note_describes_the_order_without_gold() -> None:
+    docs = _typed_docs()
+    common = sampling.sample_documents("plan_document_type", docs, policy="balanced")
+    rare_first = sampling.sample_documents(
+        "plan_document_type", docs, policy="balanced_rare_first"
+    )
+
+    common_note = common.prompt_note() or ""
+    rare_note = rare_first.prompt_note() or ""
+    assert "typical half" in common_note and "typical documents come first" in common_note
+    assert "rare/hard documents come first" in rare_note
+    assert "Resolution" not in common_note

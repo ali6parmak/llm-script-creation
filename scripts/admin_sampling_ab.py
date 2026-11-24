@@ -282,6 +282,7 @@ def _observation(
         "pairwise_distance": _pairwise_distance(documents),
         "peeked_pairwise_distance": _pairwise_distance(peeked_documents),
         "strata": _strata(documents),
+        "selection": (spec.get("sampling") or {}).get("selection") or {},
         "target_classes": target_classes,
         "peeked_target_classes": peeked_target_classes,
     }
@@ -390,13 +391,58 @@ def build_report(observations: list[dict[str, Any]]) -> str:
         metadata = ", ".join(
             f"{key}={len(values)}" for key, values in strata["metadata"].items()
         ) or "—"
+        selection = obs.get("selection") or {}
+        balanced = ""
+        if selection:
+            balanced = (
+                f" balanced order {selection.get('order')} "
+                f"(common {len(selection.get('common_ids') or [])}, "
+                f"rare/hard {len(selection.get('rare_ids') or [])}, "
+                f"hard {len(selection.get('hard_ids') or [])});"
+            )
         lines.append(
             f"- `{obs['dataset_id']}` / {obs['policy']} / `{obs['short_id']}`: "
             f"{len(obs['selected'])} selected, metadata classes {metadata}; "
             f"headers {strata['headers']}; page buckets {strata['page_buckets']}; "
-            f"hard cases {strata['hard_flags']}."
+            f"hard cases {strata['hard_flags']}.{balanced}"
         )
     lines.append("")
+
+    balanced_obs = [obs for obs in observations if obs.get("selection")]
+    if balanced_obs:
+        lines += [
+            "## Balanced 6+6 selection",
+            "",
+            "Common = prior-preserving half; rare/hard = rare target strata plus structural hard cases.",
+            "",
+            "| Dataset | Policy | Method | Order | Common target strata | Rare/hard target strata | Hard docs |",
+            "|---|---|---|---|---|---|---:|",
+        ]
+        for obs in sorted(
+            balanced_obs,
+            key=lambda item: (item["dataset_id"], item["policy"], item["created_at"]),
+        ):
+            selection = obs["selection"]
+            lines.append(
+                "| {dataset} | {policy} | `{method}` | {order} | {common} | {rare} | {hard} |".format(
+                    dataset=obs["dataset_id"],
+                    policy=obs["policy"],
+                    method=obs["short_id"],
+                    order=selection.get("order"),
+                    common=", ".join(
+                        f"{key}×{value}"
+                        for key, value in (selection.get("common_target_strata") or {}).items()
+                    )
+                    or "—",
+                    rare=", ".join(
+                        f"{key}×{value}"
+                        for key, value in (selection.get("rare_target_strata") or {}).items()
+                    )
+                    or "—",
+                    hard=len(selection.get("hard_ids") or []),
+                )
+            )
+        lines.append("")
 
     lines += [
         "## Target-label spread of the selected docs",
@@ -453,25 +499,29 @@ def build_report(observations: list[dict[str, Any]]) -> str:
         )
     lines.append("")
 
-    lines += ["## Arm deltas (descriptive only)", ""]
+    lines += ["## Arm deltas vs agent (descriptive only)", ""]
     for dataset_id in sorted({str(obs["dataset_id"]) for obs in observations}):
-        policies = sorted(
-            {str(obs["policy"]) for obs in observations if str(obs["dataset_id"]) == dataset_id}
-        )
-        if "agent" not in policies or "hybrid" not in policies:
+        dataset_obs = [obs for obs in observations if str(obs["dataset_id"]) == dataset_id]
+        by_policy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for obs in dataset_obs:
+            by_policy[str(obs["policy"])].append(obs)
+        if "agent" not in by_policy:
             continue
-        agent = [obs for obs in observations if obs["dataset_id"] == dataset_id and obs["policy"] == "agent"]
-        hybrid = [obs for obs in observations if obs["dataset_id"] == dataset_id and obs["policy"] == "hybrid"]
+        agent = by_policy["agent"]
         agent_test = _mean([obs["test"] for obs in agent])
-        hybrid_test = _mean([obs["test"] for obs in hybrid])
-        lines.append(
-            f"- `{dataset_id}`: test agent {_fmt(agent_test)} vs hybrid {_fmt(hybrid_test)} "
-            f"(Δ {_fmt(None if agent_test is None or hybrid_test is None else hybrid_test - agent_test)}); "
-            f"requests {_fmt(_mean([obs['requests'] for obs in agent]))} vs "
-            f"{_fmt(_mean([obs['requests'] for obs in hybrid]))}; "
-            f"tokens {_fmt(_mean([obs['tokens'] for obs in agent]))} vs "
-            f"{_fmt(_mean([obs['tokens'] for obs in hybrid]))}."
-        )
+        agent_requests = _mean([obs["requests"] for obs in agent])
+        agent_tokens = _mean([obs["tokens"] for obs in agent])
+        for policy in sorted(by_policy):
+            if policy == "agent":
+                continue
+            arm = by_policy[policy]
+            arm_test = _mean([obs["test"] for obs in arm])
+            lines.append(
+                f"- `{dataset_id}` / {policy} (n={len(arm)}): test {_fmt(arm_test)} vs agent "
+                f"{_fmt(agent_test)} (Δ {_fmt(None if agent_test is None or arm_test is None else arm_test - agent_test)}); "
+                f"requests {_fmt(_mean([obs['requests'] for obs in arm]))} vs {_fmt(agent_requests)}; "
+                f"tokens {_fmt(_mean([obs['tokens'] for obs in arm]))} vs {_fmt(agent_tokens)}."
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -504,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--policies",
-        default="agent,hybrid,coverage,similarity",
+        default="agent,hybrid,coverage,similarity,balanced,balanced_rare_first",
         help="comma-separated sampling policies to include",
     )
     parser.add_argument(

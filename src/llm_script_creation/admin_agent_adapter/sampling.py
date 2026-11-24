@@ -23,6 +23,14 @@ Policies
     Half coverage representatives, then farthest-first seeded from those
     representatives, plus a forced negative (target absent) and hard structural
     case when the universe has one.
+``balanced``
+    Six typical documents allocated proportionally to the target stratum (so the
+    real class prior is preserved), then six rare/hard documents (rare target
+    strata plus structural hard cases); the typical block comes first.
+``balanced_rare_first``
+    The same document set as ``balanced`` with the rare/hard block first. This is
+    the ordering control: the v3 experiment showed rare-first ordering can
+    recreate the biased-sample failure.
 
 Everything here is pure stdlib: no Mongo, no LLM, no admin-agent import. Gold is
 read only to recognise target-absent negatives and UPR record hard cases; no
@@ -40,10 +48,21 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ..datasets import dataset_stratum
 from ..task_ids import base_dataset_id
 
-POLICIES: tuple[str, ...] = ("agent", "coverage", "similarity", "hybrid")
+POLICIES: tuple[str, ...] = (
+    "agent",
+    "coverage",
+    "similarity",
+    "hybrid",
+    "balanced",
+    "balanced_rare_first",
+)
 DEFAULT_SIZE = 12
+
+#: Policies that keep the real class prior (6 typical) and add 6 rare/hard cases.
+BALANCED_POLICIES = frozenset({"balanced", "balanced_rare_first"})
 
 #: Policies that leave the train universe untouched.
 AGENT_POLICIES = frozenset({"agent", "agent_all_train"})
@@ -489,6 +508,168 @@ def _forced_docs(docs: list[_Doc]) -> list[_Doc]:
     return forced
 
 
+def _proportional_slots(sizes: dict[str, int], slots: int) -> dict[str, int]:
+    """Allocate ``slots`` proportionally to stratum sizes (largest remainder)."""
+    total = sum(sizes.values())
+    if slots <= 0 or not total:
+        return {name: 0 for name in sizes}
+    quotas: dict[str, int] = {}
+    remainders: list[tuple[float, str]] = []
+    for name, count in sizes.items():
+        exact = slots * count / total
+        quotas[name] = min(int(exact), count)
+        remainders.append((-(exact - int(exact)), name))
+    assigned = sum(quotas.values())
+    for _, name in sorted(remainders):
+        if assigned >= slots:
+            break
+        if quotas[name] < sizes[name]:
+            quotas[name] += 1
+            assigned += 1
+    while assigned < slots:
+        moved = False
+        for _, name in sorted(remainders):
+            if assigned >= slots:
+                break
+            if quotas[name] < sizes[name]:
+                quotas[name] += 1
+                assigned += 1
+                moved = True
+        if not moved:
+            break
+    return quotas
+
+
+def _balanced_selection(
+    dataset_id: str, docs: list[_Doc], size: int, *, common_first: bool = True
+) -> tuple[list[_Doc], dict[str, Any]]:
+    """Pick half typical (prior-preserving) and half rare/hard documents.
+
+    The typical half is allocated proportionally to the target stratum (gold
+    label/decade/recommendation bucket), so it mirrors the corpus instead of
+    over-representing rare classes. The rare/hard half takes one document from
+    each rarest stratum first, then hard structural cases, then fills from the
+    remaining rare strata. Gold is used only to decide which documents are
+    typical; no gold value enters the prompt.
+    """
+    groups: dict[str, list[_Doc]] = {}
+    for doc in docs:
+        stratum = dataset_stratum(dataset_id, doc.gold)
+        groups.setdefault(stratum, []).append(doc)
+    for ids in groups.values():
+        ids.sort(key=lambda doc: doc.rank)
+
+    common_slots = max(1, size // 2) if size else 0
+    rare_slots = max(0, size - common_slots)
+    quotas = _proportional_slots({name: len(ids) for name, ids in groups.items()}, common_slots)
+    common: list[_Doc] = []
+    seen_ids: set[str] = set()
+    seen_keys: set[str] = set()
+
+    def add(doc: _Doc) -> bool:
+        if doc.doc_id in seen_ids or doc.dedupe_key in seen_keys:
+            return False
+        common.append(doc)
+        seen_ids.add(doc.doc_id)
+        seen_keys.add(doc.dedupe_key)
+        return True
+
+    for name in sorted(groups, key=lambda key: (-len(groups[key]), key)):
+        for doc in groups[name][: quotas.get(name, 0)]:
+            add(doc)
+    if len(common) < common_slots:
+        for doc in sorted(docs, key=lambda item: (-len(groups[dataset_stratum(dataset_id, item.gold)]), item.rank)):
+            if len(common) >= common_slots:
+                break
+            add(doc)
+
+    rare: list[_Doc] = []
+    rare_seen_ids = set(seen_ids)
+    rare_seen_keys = set(seen_keys)
+
+    def add_rare(doc: _Doc) -> bool:
+        if doc.doc_id in rare_seen_ids or doc.dedupe_key in rare_seen_keys:
+            return False
+        rare.append(doc)
+        rare_seen_ids.add(doc.doc_id)
+        rare_seen_keys.add(doc.dedupe_key)
+        return True
+
+    rare_groups = sorted(
+        (name for name in groups if set(doc.doc_id for doc in groups[name]) - rare_seen_ids),
+        key=lambda name: (len(groups[name]), name),
+    )
+    # Reserve part of the rare/hard half for genuinely rare target strata and
+    # part for structural hard cases, so the sample covers both.
+    rare_target_slots = max(1, rare_slots // 2) if rare_slots else 0
+    for name in rare_groups:
+        if len(rare) >= rare_target_slots:
+            break
+        for doc in groups[name]:
+            if doc.doc_id not in rare_seen_ids:
+                add_rare(doc)
+                break
+
+    hard_ids: list[str] = []
+
+    def add_hard(doc: _Doc) -> None:
+        if len(rare) >= rare_slots:
+            return
+        if add_rare(doc):
+            hard_ids.append(doc.doc_id)
+
+    # One document per hard flag first (shared PDF, multi-entry, OCR, ...),
+    # then any remaining hard case by flag priority.
+    for flag in HARD_FLAGS:
+        candidates = sorted(
+            (doc for doc in docs if flag in doc.hard_flags and doc.doc_id not in rare_seen_ids),
+            key=lambda doc: doc.rank,
+        )
+        if candidates:
+            add_hard(candidates[0])
+
+    hard = sorted(
+        (doc for doc in docs if doc.hard_flags),
+        key=lambda doc: (
+            min(HARD_FLAGS.index(flag) for flag in doc.hard_flags),
+            doc.rank,
+        ),
+    )
+    for doc in hard:
+        add_hard(doc)
+
+    for name in rare_groups:
+        for doc in groups[name]:
+            if len(rare) >= rare_slots:
+                break
+            add_rare(doc)
+
+    if len(rare) < rare_slots:
+        for doc in sorted(docs, key=lambda item: item.rank):
+            if len(rare) >= rare_slots:
+                break
+            add_rare(doc)
+
+    rare = rare[:rare_slots]
+    selected = common + rare if common_first else rare + common
+    hard_ids = [doc.doc_id for doc in selected if doc.hard_flags]
+    selection = {
+        "order": "common_first" if common_first else "rare_first",
+        "common_ids": [doc.doc_id for doc in common],
+        "rare_ids": [doc.doc_id for doc in rare],
+        "hard_ids": hard_ids,
+        "common_target_strata": {
+            name: sum(1 for doc in common if dataset_stratum(dataset_id, doc.gold) == name)
+            for name in sorted({dataset_stratum(dataset_id, doc.gold) for doc in common})
+        },
+        "rare_target_strata": {
+            name: sum(1 for doc in rare if dataset_stratum(dataset_id, doc.gold) == name)
+            for name in sorted({dataset_stratum(dataset_id, doc.gold) for doc in rare})
+        },
+    }
+    return selected, selection
+
+
 def _greedy_coverage(
     docs: list[_Doc], size: int, forced: list[_Doc]
 ) -> list[_Doc]:
@@ -600,6 +781,7 @@ class SamplingResult:
     documents: tuple[dict[str, Any], ...]
     notes: tuple[str, ...]
     digest: str
+    selection: dict[str, Any] | None = None
 
     @property
     def restricted(self) -> bool:
@@ -610,6 +792,16 @@ class SamplingResult:
         if not self.restricted or not self.doc_ids:
             return None
         count = len(self.doc_ids)
+        if self.policy in BALANCED_POLICIES:
+            order = (self.selection or {}).get("order", "common_first")
+            first_block = "typical" if order == "common_first" else "rare/hard"
+            second_block = "rare/hard" if order == "common_first" else "typical"
+            return (
+                f"SAMPLE NOTE: these {count} train documents contain a typical half and a "
+                f"rare/hard half. The {first_block} documents come first, then the "
+                f"{second_block} ones. Do not assume the rare/hard cases represent the "
+                "corpus; use the typical documents to calibrate, then inspect the hard cases."
+            )
         return (
             f"SAMPLE NOTE: these {count} train documents were chosen to cover this task's "
             "layout and class variety. Peek across several of them, not just the first one "
@@ -629,10 +821,19 @@ class SamplingResult:
             "negatives": list(self.negatives),
             "documents": list(self.documents),
             "notes": list(self.notes),
+            "selection": self.selection or {},
         }
 
 
-def _summarize(docs: list[_Doc], selected: list[_Doc], policy: str, universe: int, size: int) -> SamplingResult:
+def _summarize(
+    docs: list[_Doc],
+    selected: list[_Doc],
+    policy: str,
+    universe: int,
+    size: int,
+    *,
+    selection: dict[str, Any] | None = None,
+) -> SamplingResult:
     by_id = {doc.doc_id: doc for doc in selected}
     metadata = {
         dimension: sorted({doc.metadata_classes[dimension] for doc in selected})
@@ -702,6 +903,7 @@ def _summarize(docs: list[_Doc], selected: list[_Doc], policy: str, universe: in
         documents=documents,
         notes=tuple(notes),
         digest=digest,
+        selection=selection,
     )
 
 
@@ -745,6 +947,14 @@ def sample_documents(
         selected = _greedy_coverage(docs, size, _forced_docs(docs))
     elif policy == "similarity":
         selected = _farthest_first(docs, _tfidf_vectors(docs), size, [])
+    elif policy in BALANCED_POLICIES:
+        selected, selection = _balanced_selection(
+            dataset_id,
+            docs,
+            size,
+            common_first=policy == "balanced",
+        )
+        return _summarize(docs, selected, policy, len(docs), size, selection=selection)
     else:  # hybrid
         coverage_size = max(1, size // 2)
         cohort = _greedy_coverage(docs, coverage_size, _forced_docs(docs))
@@ -778,6 +988,7 @@ def restrict_documents(
 
 __all__ = [
     "AGENT_POLICIES",
+    "BALANCED_POLICIES",
     "DEFAULT_SIZE",
     "HARD_FLAGS",
     "HEADER_PATTERNS",
