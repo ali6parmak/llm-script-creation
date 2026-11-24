@@ -171,6 +171,7 @@ def interactive_table(
         frame,
         status_column="status" if status else None,
         metric_columns=metrics,
+        theme_base=True,
     )
     kwargs: dict[str, Any] = {
         "width": "stretch",

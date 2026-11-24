@@ -460,9 +460,38 @@ def table_style(
     *,
     status_column: str | None = None,
     metric_columns: list[str] | None = None,
+    theme_base: bool = False,
 ) -> Any:
-    """Combined Styler for HTML tables (status cells + metric gradients)."""
+    """Combined Styler for tables (status cells + metric gradients).
+
+    ``theme_base=True`` also paints the base cell/header colors. Use it for
+    ``st.dataframe``: its grid is canvas-rendered and ignores the app's custom
+    palette CSS, but it does honor pandas cell styles.
+    """
     styler = frame.style
+    if theme_base:
+        styler = styler.set_properties(
+            **{"background-color": PALETTE["bg1"], "color": PALETTE["fg"]}
+        ).set_table_styles(
+            [
+                {
+                    "selector": "thead th",
+                    "props": [
+                        ("background-color", PALETTE["bg2"]),
+                        ("color", PALETTE["fg"]),
+                        ("border-color", PALETTE["bg3"]),
+                    ],
+                },
+                {
+                    "selector": "tbody td",
+                    "props": [
+                        ("background-color", PALETTE["bg1"]),
+                        ("color", PALETTE["fg"]),
+                        ("border-color", PALETTE["bg2"]),
+                    ],
+                },
+            ]
+        )
     if status_column and status_column in frame.columns:
 
         def status_color(value: Any) -> str:
